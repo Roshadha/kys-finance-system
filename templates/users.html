@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Users & access · K.Y.S. Finance{% endblock %}
+{% block page_title %}Users &amp; access{% endblock %}
+{% block content %}
+<section class="hero-row compact"><div><span class="eyebrow">Role-based permissions</span><h1>User administration</h1><p>Give each operator access only to the tasks they need.</p></div><a class="btn primary" href="{{ url_for('user_new') }}">+ Create user</a></section>
+<article class="card table-card"><div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Department</th><th>Assigned tasks</th><th>Status</th><th></th></tr></thead><tbody>
+{% for user in users %}<tr><td><div class="user-cell"><span class="avatar">{{ user.display_name[:1]|upper }}</span><span><b>{{ user.display_name }}</b><small>{{ user.username }}</small></span></div></td><td>{{ ROLES[user.role] }}</td><td>{{ user.department or '—' }}</td><td><div class="tag-list">{% if user.role == 'admin' %}<span>All system tasks</span>{% else %}{% for task in user.tasks %}<span>{{ TASKS.get(task, task) }}</span>{% endfor %}{% endif %}</div></td><td><span class="status {{ 'income' if user.active else 'disabled' }}">{{ 'Active' if user.active else 'Disabled' }}</span></td><td><div class="action-row"><a class="row-action" href="{{ url_for('user_edit', user_id=user.id) }}">Edit</a><form action="{{ url_for('user_toggle', user_id=user.id) }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="row-action" type="submit">{{ 'Disable' if user.active else 'Enable' }}</button></form></div></td></tr>{% endfor %}
+</tbody></table></div></article>
+{% endblock %}
+

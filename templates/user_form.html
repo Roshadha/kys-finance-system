@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% set editing = edit_user is defined %}
+{% block title %}{{ 'Edit' if editing else 'Create' }} user · K.Y.S. Finance{% endblock %}
+{% block page_title %}{{ 'Edit' if editing else 'Create' }} user{% endblock %}
+{% block content %}
+<section class="hero-row compact"><div><span class="eyebrow">Administrator action</span><h1>{{ 'Edit user access' if editing else 'New user account' }}</h1><p>Assign a role, department, and the exact tasks this person can open.</p></div></section>
+<form class="card form-card centered" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><div class="field-grid">
+  <label>Display name<input name="display_name" required value="{{ request.form.get('display_name', edit_user.display_name if editing else '') }}"></label>
+  <label>Department<input name="department" value="{{ request.form.get('department', edit_user.department if editing else '') }}"></label>
+  {% if not editing %}<label>Username<input name="username" required autocomplete="off" value="{{ request.form.get('username','') }}"></label><label>Temporary password<input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+  {% else %}<label>Username<input value="{{ edit_user.username }}" disabled></label><label>Reset password <span class="optional">Optional</span><input type="password" name="password" minlength="8" autocomplete="new-password" placeholder="Leave blank to keep current"></label>{% endif %}
+  <label class="span-2">Role<select name="role" id="roleSelect">{% for key, label in ROLES.items() %}<option value="{{ key }}" {{ 'selected' if request.form.get('role', edit_user.role if editing else 'data_entry') == key }}>{{ label }}</option>{% endfor %}</select></label>
+  <fieldset class="span-2 task-fieldset" id="taskFieldset"><legend>Assigned tasks</legend>{% set assigned = request.form.getlist('tasks') if request.method == 'POST' else (edit_user.tasks if editing else []) %}{% for key, label in TASKS.items() %}<label class="check"><input type="checkbox" name="tasks" value="{{ key }}" {{ 'checked' if key in assigned }}><span><b>{{ label }}</b><small>Allow this section for the user</small></span></label>{% endfor %}</fieldset>
+</div><div class="form-actions"><a class="btn ghost" href="{{ url_for('users') }}">Cancel</a><button class="btn primary" type="submit">{{ 'Save changes' if editing else 'Create account' }}</button></div></form>
+{% endblock %}
+

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Overview · K.Y.S. Finance{% endblock %}
+{% block page_title %}Overview{% endblock %}
+{% block content %}
+<section class="hero-row">
+  <div><span class="eyebrow">{{ today.strftime('%A, %d %B %Y') }}</span><h1>Good day, {{ current_user.display_name.split()[0] }}.</h1><p>Here is the cash position recorded for this month.</p></div>
+  <div class="action-row">
+    {% if current_user.can('income_entry') %}<a class="btn secondary" href="{{ url_for('transaction_new', kind='income') }}">+ Receipt</a>{% endif %}
+    {% if current_user.can('expense_entry') %}<a class="btn primary" href="{{ url_for('transaction_new', kind='expense') }}">+ Payment</a>{% endif %}
+  </div>
+</section>
+<section class="kpi-grid">
+  <article class="kpi income"><div class="kpi-icon">↙</div><span>Liquid income</span><strong>Rs. {{ data.income|money }}</strong><small>Actual receipts this month</small></article>
+  <article class="kpi expense"><div class="kpi-icon">↗</div><span>Total expenditure</span><strong>Rs. {{ data.expense|money }}</strong><small>Actual payments this month</small></article>
+  <article class="kpi profit"><div class="kpi-icon">≈</div><span>Liquid P/L</span><strong class="{{ 'negative' if data.pl < 0 }}">Rs. {{ data.pl|money }}</strong><small>Income less expenditure</small></article>
+</section>
+<section class="dashboard-grid">
+  <article class="card chart-card">
+    <div class="card-head"><div><span class="eyebrow">Six-month view</span><h2>Cash movement</h2></div><span class="legend"><i class="in"></i>Income <i class="out"></i>Expense</span></div>
+    {% set peak = ([1] + monthly|map(attribute='income')|list + monthly|map(attribute='expense')|list)|max %}
+    <div class="bar-chart">
+      {% for month in monthly %}<div class="bar-group"><div class="bars"><i class="bar in" style="height:{{ (month.income / peak * 100)|round }}%"></i><i class="bar out" style="height:{{ (month.expense / peak * 100)|round }}%"></i></div><span>{{ month.label }}</span></div>{% endfor %}
+    </div>
+  </article>
+  <article class="card quick-card">
+    <div class="card-head"><div><span class="eyebrow">Shortcuts</span><h2>Quick actions</h2></div></div>
+    <div class="quick-list">
+      {% if current_user.can('income_entry') %}<a href="{{ url_for('transaction_new', kind='income') }}"><b>Record receipt</b><small>Income, rent or bank interest</small><span>→</span></a>{% endif %}
+      {% if current_user.can('expense_entry') %}<a href="{{ url_for('transaction_new', kind='expense') }}"><b>Record payment</b><small>Trade or operational cost</small><span>→</span></a>{% endif %}
+      {% if current_user.can('view_reports') %}<a href="{{ url_for('reports') }}"><b>Open P&amp;L report</b><small>View or export to Excel</small><span>→</span></a>{% endif %}
+      {% if current_user.role == 'admin' %}<form action="{{ url_for('backup_now') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit"><b>Back up database</b><small>Create a safe copy now</small><span>→</span></button></form>{% endif %}
+    </div>
+  </article>
+</section>
+<article class="card table-card">
+  <div class="card-head"><div><span class="eyebrow">Latest activity</span><h2>Recent cash entries</h2></div><a class="text-link" href="{{ url_for('transactions') }}">View ledger →</a></div>
+  {% if recent %}<div class="table-wrap"><table><thead><tr><th>Date</th><th>Reference</th><th>Particular</th><th>Type</th><th class="number">Cash total</th></tr></thead><tbody>{% for item in recent %}<tr><td>{{ item.cash_date.strftime('%d %b %Y') }}</td><td><b>{{ item.reference }}</b></td><td>{{ item.category.name }}</td><td><span class="status {{ item.category.kind }}">{{ item.category.kind }}</span></td><td class="number"><b>Rs. {{ item.adjusted_total|money }}</b></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty"><span>↔</span><h3>No cash entries yet</h3><p>Start by recording an actual receipt or payment.</p></div>{% endif %}
+</article>
+{% endblock %}
+

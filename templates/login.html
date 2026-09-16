@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Sign in · K.Y.S. Finance{% endblock %}
+{% block content %}
+<main class="login-shell">
+  <section class="login-panel">
+    <div class="login-brand"><span class="brand-mark large">K</span><span><strong>K.Y.S.</strong><small>Cash-Based P&amp;L Management</small></span></div>
+    <div class="login-copy">
+      <span class="pill light">Secure local accounting</span>
+      <h1>Actual cash.<br><em>Clear decisions.</em></h1>
+      <p>Record money received and paid, preserve every correction, and deliver bank-ready P&amp;L reports.</p>
+      <div class="equation"><span>Liquid Income</span><b>−</b><span>Expenditure</span><b>=</b><span>Liquid P/L</span></div>
+    </div>
+    <small class="login-foot">Private local-network system · K.Y.S.</small>
+  </section>
+  <section class="login-form-wrap">
+    <form class="login-form" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <span class="eyebrow">Welcome back</span>
+      <h2>Sign in to continue</h2>
+      <p>Use your assigned username and password.</p>
+      <label>Username<input name="username" required autocomplete="username" autofocus placeholder="e.g. recovery"></label>
+      <label>Password<input type="password" name="password" required autocomplete="current-password" placeholder="Enter your password"></label>
+      <button class="btn primary wide" type="submit">Sign in <span>→</span></button>
+      <div class="login-help"><b>Need access?</b> Contact the system administrator to create an account or assign a task.</div>
+    </form>
+  </section>
+</main>
+{% endblock %}
+
