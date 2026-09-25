@@ -1,4 +1,10 @@
 .venv/
+release/
+build-package/
+.playwright-cli/
+group-report-update/
+kys-finance-group-reports.zip
+KYS-Finance-Company-Server-Windows.zip
 __pycache__/
 .pytest_cache/
 data/*.db

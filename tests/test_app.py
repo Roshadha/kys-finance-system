@@ -50,7 +50,7 @@ class FinanceAppTests(unittest.TestCase):
         with self.app.app_context():
             category_id = Category.query.filter_by(code="351", kind="income").first().id
         response = self.client.post("/transactions/new?kind=income", data={
-            "csrf_token": self.csrf(), "kind": "income", "category_id": category_id,
+            "csrf_token": self.csrf(), "kind": "income", "group_name": "Trade Income", "category_id": category_id,
             "cash_date": date.today().isoformat(), "reference": "TEST-001",
             "counterparty": "Test Customer", "description": "Cash receipt",
             "subtotal": "100000", "sscl": "2500", "vat": "18000",
@@ -77,6 +77,51 @@ class FinanceAppTests(unittest.TestCase):
         self.assertEqual(self.client.get("/transactions/new?kind=income").status_code, 200)
         self.assertEqual(self.client.get("/transactions/new?kind=expense").status_code, 403)
         self.assertEqual(self.client.get("/reports").status_code, 403)
+
+    def test_group_account_selection_and_optional_reference_counterparty(self):
+        self.login()
+        with self.app.app_context():
+            income = Category.query.filter_by(code="351", kind="income").first()
+            expense = Category.query.filter_by(code="501", kind="expense").first()
+            account_ids = (("income", income.group_name, income.id),
+                           ("expense", expense.group_name, expense.id))
+        for kind, group, account_id in account_ids:
+            page = self.client.get(f"/transactions/new?kind={kind}")
+            self.assertIn(b'transactionGroupSelect', page.data)
+            self.assertIn(b'data-group=', page.data)
+            response = self.client.post(f"/transactions/new?kind={kind}", data={
+                "csrf_token": self.csrf(), "kind": kind, "group_name": group,
+                "category_id": account_id, "cash_date": date.today().isoformat(),
+                "reference": "", "counterparty": "", "subtotal": "125.00",
+            })
+            self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(Transaction.query.filter_by(reference="", counterparty="").count(), 2)
+        mismatch = self.client.post("/transactions/new?kind=income", data={
+            "csrf_token": self.csrf(), "kind": "income", "group_name": "Rental Income",
+            "category_id": account_ids[0][2], "cash_date": date.today().isoformat(),
+            "subtotal": "125.00",
+        })
+        self.assertEqual(mismatch.status_code, 200)
+        self.assertIn(b'Select a valid account.', mismatch.data)
+
+    def test_grouped_money_input_is_saved_at_its_numeric_value(self):
+        self.login()
+        with self.app.app_context():
+            category = Category.query.filter_by(code="351", kind="income").first()
+            category_id, group_name = category.id, category.group_name
+        page = self.client.get("/transactions/new?kind=income")
+        self.assertIn(b'placeholder="0.00"', page.data)
+        self.assertNotIn(b'value="0.00"', page.data)
+        response = self.client.post("/transactions/new?kind=income", data={
+            "csrf_token": self.csrf(), "kind": "income", "group_name": group_name,
+            "category_id": category_id, "cash_date": date.today().isoformat(),
+            "subtotal": "500,000.00", "sscl": "2,500.00", "vat": "18,000.00",
+        })
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            txn = Transaction.query.filter_by(subtotal=500000).one()
+            self.assertEqual(float(txn.total), 520500)
 
 
 if __name__ == "__main__":

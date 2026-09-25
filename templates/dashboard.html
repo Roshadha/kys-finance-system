@@ -5,8 +5,8 @@
 <section class="hero-row">
   <div><span class="eyebrow">{{ today.strftime('%A, %d %B %Y') }}</span><h1>Good day, {{ current_user.display_name.split()[0] }}.</h1><p>Here is the cash position recorded for this month.</p></div>
   <div class="action-row">
-    {% if current_user.can('income_entry') %}<a class="btn secondary" href="{{ url_for('transaction_new', kind='income') }}">+ Receipt</a>{% endif %}
-    {% if current_user.can('expense_entry') %}<a class="btn primary" href="{{ url_for('transaction_new', kind='expense') }}">+ Payment</a>{% endif %}
+    {% if current_user.can('income_entry') %}<a class="btn secondary" href="{{ url_for('transaction_new', kind='income') }}">+ Income</a>{% endif %}
+    {% if current_user.can('expense_entry') %}<a class="btn primary" href="{{ url_for('transaction_new', kind='expense') }}">+ Expenditure</a>{% endif %}
   </div>
 </section>
 <section class="kpi-grid">
@@ -25,8 +25,8 @@
   <article class="card quick-card">
     <div class="card-head"><div><span class="eyebrow">Shortcuts</span><h2>Quick actions</h2></div></div>
     <div class="quick-list">
-      {% if current_user.can('income_entry') %}<a href="{{ url_for('transaction_new', kind='income') }}"><b>Record receipt</b><small>Income, rent or bank interest</small><span>→</span></a>{% endif %}
-      {% if current_user.can('expense_entry') %}<a href="{{ url_for('transaction_new', kind='expense') }}"><b>Record payment</b><small>Trade or operational cost</small><span>→</span></a>{% endif %}
+      {% if current_user.can('income_entry') %}<a href="{{ url_for('transaction_new', kind='income') }}"><b>Record income</b><small>Income, rent or bank interest</small><span>→</span></a>{% endif %}
+      {% if current_user.can('expense_entry') %}<a href="{{ url_for('transaction_new', kind='expense') }}"><b>Record expenditure</b><small>Trade or operational cost</small><span>→</span></a>{% endif %}
       {% if current_user.can('view_reports') %}<a href="{{ url_for('reports') }}"><b>Open P&amp;L report</b><small>View or export to Excel</small><span>→</span></a>{% endif %}
       {% if current_user.role == 'admin' %}<form action="{{ url_for('backup_now') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit"><b>Back up database</b><small>Create a safe copy now</small><span>→</span></button></form>{% endif %}
     </div>
@@ -37,4 +37,3 @@
   {% if recent %}<div class="table-wrap"><table><thead><tr><th>Date</th><th>Reference</th><th>Particular</th><th>Type</th><th class="number">Cash total</th></tr></thead><tbody>{% for item in recent %}<tr><td>{{ item.cash_date.strftime('%d %b %Y') }}</td><td><b>{{ item.reference }}</b></td><td>{{ item.category.name }}</td><td><span class="status {{ item.category.kind }}">{{ item.category.kind }}</span></td><td class="number"><b>Rs. {{ item.adjusted_total|money }}</b></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty"><span>↔</span><h3>No cash entries yet</h3><p>Start by recording an actual receipt or payment.</p></div>{% endif %}
 </article>
 {% endblock %}
-

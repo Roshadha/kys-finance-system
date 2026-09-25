@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -32,6 +33,9 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 
 BASE_DIR = Path(__file__).resolve().parent
+# Bundled templates/static live inside PyInstaller's resource folder, while
+# user data must remain beside the executable across upgrades and restarts.
+DATA_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else BASE_DIR
 db = SQLAlchemy()
 
 TASKS = {
@@ -70,6 +74,14 @@ class User(db.Model):
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
+
+
+class Group(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    kind = db.Column(db.String(20), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    __table_args__ = (db.UniqueConstraint("kind", "name", name="uq_group_kind_name"),)
 
 
 class Category(db.Model):
@@ -143,7 +155,7 @@ class AuditLog(db.Model):
 
 def create_app(test_config=None):
     app = Flask(__name__)
-    data_dir = BASE_DIR / "data"
+    data_dir = DATA_ROOT / "data"
     data_dir.mkdir(exist_ok=True)
     secret_file = data_dir / ".secret_key"
     if os.environ.get("KYS_SECRET_KEY"):
@@ -156,14 +168,14 @@ def create_app(test_config=None):
     app.config.update(
         SECRET_KEY=secret_key,
         SQLALCHEMY_DATABASE_URI=os.environ.get(
-            "KYS_DATABASE_URL", f"sqlite:///{(BASE_DIR / 'data' / 'kys_finance.db').as_posix()}"
+            "KYS_DATABASE_URL", f"sqlite:///{(DATA_ROOT / 'data' / 'kys_finance.db').as_posix()}"
         ),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         MAX_CONTENT_LENGTH=2 * 1024 * 1024,
     )
     if test_config:
         app.config.update(test_config)
-    (BASE_DIR / "backups").mkdir(exist_ok=True)
+    (DATA_ROOT / "backups").mkdir(exist_ok=True)
     db.init_app(app)
 
     with app.app_context():
@@ -234,7 +246,11 @@ def parse_date(value, fallback=None):
 
 def parse_money(value):
     try:
-        return round(float(value or 0), 2)
+        cleaned = str(value or "0").replace(",", "").strip()
+        amount = float(cleaned)
+        if not -1_000_000_000_000 < amount < 1_000_000_000_000:
+            raise ValueError
+        return round(amount, 2)
     except (TypeError, ValueError):
         raise ValueError("Enter a valid amount.")
 
@@ -260,16 +276,41 @@ def base_transactions(start, end):
     )
 
 
-def build_report(start, end, report_type="monthly"):
+def report_groups():
+    # Include historical category groups even when disabled for new entries.
+    keys = {(g.kind, g.name) for g in Group.query.all()}
+    keys.update((c.kind, c.group_name) for c in Category.query.all())
+    return [{"kind": kind, "name": name, "key": json.dumps([kind, name])}
+            for kind, name in sorted(keys, key=lambda k: (k[0] != "income", k[1]))]
+
+
+def selected_report_groups():
+    options = report_groups()
+    selected = list(dict.fromkeys(request.args.getlist("group")))
+    if set(selected) - {g["key"] for g in options}:
+        abort(400, description="Unknown report group. Select groups from the report form.")
+    return options, selected
+
+
+def build_report(start, end, report_type="monthly", selected_groups=None):
+    selected = {tuple(json.loads(key)) for key in (selected_groups or [])}
+
+    def includes(c):
+        if selected and (c.kind, c.group_name) not in selected:
+            return False
+        if report_type == "direct" and not c.service_line:
+            return False
+        if report_type == "rental" and not c.entity_name:
+            return False
+        if report_type == "construction" and "Construction" not in c.group_name:
+            return False
+        return True
+
     txns = base_transactions(start, end)
     filtered = []
     for txn in txns:
         c = txn.category
-        if report_type == "direct" and not c.service_line:
-            continue
-        if report_type == "rental" and not c.entity_name:
-            continue
-        if report_type == "construction" and "Construction" not in c.group_name:
+        if not includes(c):
             continue
         filtered.append(txn)
 
@@ -278,6 +319,7 @@ def build_report(start, end, report_type="monthly"):
         c = txn.category
         adjusted = txn.adjusted_total
         rows.append({
+            "Category ID": c.id,
             "Date": txn.cash_date.isoformat(),
             "Reference": txn.reference,
             "Type": c.kind.title(),
@@ -310,11 +352,32 @@ def build_report(start, end, report_type="monthly"):
         {"label": key, **values, "pl": values["income"] - values["expense"]}
         for key, values in sorted(grouped.items())
     ]
-    return {"rows": rows, "summary": summary, "income": income, "expense": expense, "pl": income - expense}
+    columns = ["Subtotal", "SSCL", "VAT", "Adjustments", "Cash Total"]
+    account_totals = {}
+    for row in rows:
+        totals = account_totals.setdefault(row["Category ID"], dict.fromkeys(columns, 0.0))
+        for col in columns:
+            totals[col] += row[col]
+    sections = []
+    for kind in ("income", "expense"):
+        groups = {}
+        for c in Category.query.filter_by(kind=kind).order_by(Category.group_name, Category.code, Category.name, Category.id).all():
+            if not includes(c) or c.id not in account_totals:
+                continue
+            group = groups.setdefault(c.group_name, {"name": c.group_name, "items": [], "totals": dict.fromkeys(columns, 0.0)})
+            amounts = account_totals.get(c.id, dict.fromkeys(columns, 0.0))
+            group["items"].append({"code": c.code or "—", "name": c.name, "amounts": amounts})
+            for col in columns:
+                group["totals"][col] += amounts[col]
+        sections.append({"kind": kind, "label": "Income" if kind == "income" else "Expenditure",
+                         "groups": list(groups.values()),
+                         "totals": {col: sum(g["totals"][col] for g in groups.values()) for col in columns}})
+    return {"rows": rows, "summary": summary, "sections": sections, "columns": columns,
+            "income": income, "expense": expense, "pl": income - expense}
 
 
-def export_report_xlsx(start, end, report_type):
-    data = build_report(start, end, report_type)
+def export_report_xlsx(start, end, report_type, selected_groups=None):
+    data = build_report(start, end, report_type, selected_groups)
     output = BytesIO()
     title_map = {
         "monthly": "Monthly Cash-Based P&L",
@@ -332,16 +395,44 @@ def export_report_xlsx(start, end, report_type):
         "Expenditure": data["expense"], "Liquid P/L": data["pl"],
     })
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        grouped_rows = []
+        styled_rows = []
+        def statement_row(label, amounts=None, code="", bold=False, number=""):
+            if bold:
+                styled_rows.append(len(grouped_rows) + 6)
+            if report_type == "short":
+                grouped_rows.append({"Group": label, "Cash Total": amounts["Cash Total"] if amounts else None})
+            else:
+                amount = amounts["Cash Total"] if amounts else None
+                grouped_rows.append({"No.": number, "Particular": label, "A/C code": code,
+                                     "Amount (LKR)": amount if not bold else None,
+                                     "Total (LKR)": amount if bold else None})
+        for section in data["sections"]:
+            if not section["groups"]:
+                continue
+            statement_row(section["label"] + " Particulars", bold=True)
+            for group in section["groups"]:
+                if report_type == "short":
+                    statement_row(group["name"], group["totals"], bold=True)
+                else:
+                    statement_row(group["name"], bold=True)
+                    for number, item in enumerate(group["items"], start=1):
+                        statement_row(item["name"], item["amounts"], item["code"], number=number)
+                    statement_row(group["name"] + " — Total", group["totals"], bold=True)
+            statement_row("Total " + section["label"], section["totals"], bold=True)
+        statement_row("Liquid P/L", {col: data["pl"] if col == "Cash Total" else None for col in data["columns"]}, bold=True)
+        pd.DataFrame(grouped_rows).to_excel(writer, sheet_name="Group Report", index=False, startrow=4)
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False, startrow=4)
         if report_type != "short":
-            pd.DataFrame(data["rows"]).to_excel(writer, sheet_name="Detailed Ledger", index=False, startrow=4)
+            pd.DataFrame([{k: v for k, v in row.items() if k != "Category ID"} for row in data["rows"]]).to_excel(writer, sheet_name="Detailed Ledger", index=False, startrow=4)
         for ws in writer.book.worksheets:
             ws["A1"] = "K.Y.S. Cash-Based P&L Management System"
             ws["A2"] = title_map.get(report_type, title_map["monthly"])
             ws["A3"] = f"Cash period: {start:%d %b %Y} to {end:%d %b %Y}"
+            ws["A4"] = "Groups: " + (", ".join(f"{json.loads(key)[0].title()}: {json.loads(key)[1]}" for key in selected_groups) if selected_groups else "All groups")
             ws["A1"].font = Font(size=16, bold=True, color="FFFFFF")
             ws["A1"].fill = PatternFill("solid", fgColor="0D3B34")
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(ws.max_column, 4))
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(ws.max_column, 2 if report_type == "short" else 4))
             ws["A2"].font = Font(size=12, bold=True, color="163C34")
             header_fill = PatternFill("solid", fgColor="DCEBE6")
             thin = Side(style="thin", color="D6E0DC")
@@ -360,6 +451,41 @@ def export_report_xlsx(start, end, report_type):
                 for cell in row:
                     if isinstance(cell.value, (int, float)):
                         cell.number_format = '#,##0.00;[Red]-#,##0.00'
+                    elif cell.data_type == "f":
+                        cell.data_type = "s"
+        ws = writer.book["Group Report"]
+        ws.auto_filter.ref = None
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 58
+        for col in range(3, 6):
+            ws.column_dimensions[get_column_letter(col)].width = 20
+        for row in ws.iter_rows(min_row=6):
+            for cell in row:
+                cell.alignment = Alignment(vertical="center", wrap_text=True,
+                                           horizontal="right" if isinstance(cell.value, (int, float)) else "left")
+                cell.border = Border(bottom=Side(style="thin", color="D6E0DC"))
+            if report_type != "short":
+                row[0].number_format = '0'
+            ws.row_dimensions[row[0].row].height = 32
+        for row_number in styled_rows:
+            for cell in ws[row_number]:
+                cell.font = Font(bold=True, color="163C34")
+                cell.fill = PatternFill("solid", fgColor="EAF2EF")
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.print_title_rows = "1:5"
+        ws.print_area = f"A1:E{ws.max_row}"
+        ws.cell(ws.max_row + 2, 1, "Total Liquid Income − Total Expenditure = Liquid P/L")
+        ws.cell(ws.max_row + 1, 1, f"{data['income']:,.2f} − {data['expense']:,.2f} = {data['pl']:,.2f} LKR")
+        ws.print_area = f"A1:E{ws.max_row}"
+        if report_type == "short":
+            ws.column_dimensions["A"].width = 58
+            ws.column_dimensions["B"].width = 22
+            ws.print_area = f"A1:B{ws.max_row}"
+        ws.print_options.horizontalCentered = True
     output.seek(0)
     return output
 
@@ -455,7 +581,10 @@ def register_routes(app):
         if request.method == "POST":
             try:
                 category = db.session.get(Category, int(request.form.get("category_id", 0)))
-                if not category or category.kind != requested_kind:
+                selected_group = request.form.get("group_name", "").strip()
+                if not selected_group:
+                    raise ValueError("Select a group.")
+                if not category or category.kind != requested_kind or not category.active or category.group_name != selected_group:
                     raise ValueError("Select a valid account.")
                 cash_date = parse_date(request.form.get("cash_date"))
                 if not cash_date:
@@ -463,13 +592,13 @@ def register_routes(app):
                 subtotal = parse_money(request.form.get("subtotal"))
                 sscl = parse_money(request.form.get("sscl"))
                 vat = parse_money(request.form.get("vat"))
+                if min(subtotal, sscl, vat) < 0:
+                    raise ValueError("Amounts cannot be negative.")
                 total = round(subtotal + sscl + vat, 2)
                 if total <= 0:
                     raise ValueError("Grand total must be greater than zero.")
                 reference = request.form.get("reference", "").strip()
                 counterparty = request.form.get("counterparty", "").strip()
-                if not reference or not counterparty:
-                    raise ValueError("Reference and counterparty are required.")
                 vehicle_id = request.form.get("vehicle_id") or None
                 if "Vehicle Running" in category.name and not vehicle_id:
                     raise ValueError("Choose the vehicle for this maintenance entry.")
@@ -521,20 +650,23 @@ def register_routes(app):
     def reports():
         start, end = period_from_request()
         report_type = request.args.get("type", "monthly")
-        if report_type not in {"monthly", "short", "direct", "rental", "construction"}:
+        if report_type not in {"monthly", "short"}:
             report_type = "monthly"
-        data = build_report(start, end, report_type)
-        return render_template("reports.html", data=data, start=start, end=end, report_type=report_type)
+        groups, selected_groups = selected_report_groups()
+        data = build_report(start, end, report_type, selected_groups)
+        return render_template("reports.html", data=data, start=start, end=end, report_type=report_type,
+                               groups=groups, selected_groups=selected_groups)
 
     @app.get("/reports/export")
     @task_required("view_reports")
     def reports_export():
         start, end = period_from_request()
         report_type = request.args.get("type", "monthly")
-        if report_type not in {"monthly", "short", "direct", "rental", "construction"}:
+        if report_type not in {"monthly", "short"}:
             report_type = "monthly"
-        output = export_report_xlsx(start, end, report_type)
-        audit("export", "report", None, f"{report_type}: {start} to {end}")
+        groups, selected_groups = selected_report_groups()
+        output = export_report_xlsx(start, end, report_type, selected_groups)
+        audit("export", "report", None, f"{report_type}: {start} to {end}; groups: {selected_groups or 'All'}")
         db.session.commit()
         return send_file(
             output, as_attachment=True,
@@ -629,7 +761,8 @@ def register_routes(app):
     @role_required("admin")
     def categories():
         items = Category.query.order_by(Category.kind, Category.group_name, Category.code, Category.name).all()
-        return render_template("categories.html", categories=items)
+        groups = Group.query.filter_by(active=True).order_by(Group.kind, Group.name).all()
+        return render_template("categories.html", categories=items, groups=groups)
 
     @app.post("/categories")
     @role_required("admin")
@@ -637,8 +770,13 @@ def register_routes(app):
         kind = request.form.get("kind", "")
         group_name = request.form.get("group_name", "").strip()
         name = request.form.get("name", "").strip()
+        valid_group = kind in {"income", "expense"} and Group.query.filter_by(
+            kind=kind, name=group_name, active=True
+        ).first()
         if kind not in {"income", "expense"} or not group_name or not name:
             flash("Type, group, and particular name are required.", "error")
+        elif not valid_group:
+            flash("Select a valid group for the chosen type, or add a new one on the Groups page first.", "error")
         else:
             item = Category(
                 code=request.form.get("code", "").strip() or None, kind=kind,
@@ -662,6 +800,40 @@ def register_routes(app):
         db.session.commit()
         flash("Account availability updated.", "success")
         return redirect(url_for("categories"))
+
+    @app.get("/groups")
+    @role_required("admin")
+    def groups():
+        items = Group.query.order_by(Group.kind, Group.name).all()
+        return render_template("groups.html", groups=items)
+
+    @app.post("/groups")
+    @role_required("admin")
+    def group_new():
+        kind = request.form.get("kind", "")
+        name = request.form.get("name", "").strip()
+        if kind not in {"income", "expense"} or not name:
+            flash("Type and group name are required.", "error")
+        elif Group.query.filter(Group.kind == kind, func.lower(Group.name) == name.lower()).first():
+            flash("That group already exists for this type.", "error")
+        else:
+            item = Group(kind=kind, name=name)
+            db.session.add(item)
+            db.session.flush()
+            audit("create", "group", item.id, f"{kind}: {name}")
+            db.session.commit()
+            flash("Group added.", "success")
+        return redirect(url_for("groups"))
+
+    @app.post("/groups/<int:group_id>/toggle")
+    @role_required("admin")
+    def group_toggle(group_id):
+        item = db.get_or_404(Group, group_id)
+        item.active = not item.active
+        audit("status", "group", item.id, f"Active: {item.active}")
+        db.session.commit()
+        flash("Group availability updated.", "success")
+        return redirect(url_for("groups"))
 
     @app.post("/vehicles")
     @role_required("admin")
@@ -727,8 +899,8 @@ def make_backup(app):
         raise RuntimeError("Automatic file backup is only available for SQLite.")
     source = Path(database_uri.removeprefix("sqlite:///"))
     if not source.is_absolute():
-        source = BASE_DIR / source
-    destination = BASE_DIR / "backups" / f"kys_finance_{datetime.now():%Y%m%d_%H%M%S_%f}.db"
+        source = DATA_ROOT / source
+    destination = DATA_ROOT / "backups" / f"kys_finance_{datetime.now():%Y%m%d_%H%M%S_%f}.db"
     temporary = destination.with_suffix(".tmp")
     destination.parent.mkdir(exist_ok=True)
     with closing(sqlite3.connect(source)) as source_db, closing(sqlite3.connect(temporary)) as backup_db:
@@ -827,6 +999,16 @@ def seed_database():
         for code, name in investments:
             add(code, "expense", "Investment Projects Expenditure", name)
         db.session.add_all(categories)
+
+    if not Group.query.first():
+        seen = set()
+        groups = []
+        for cat in Category.query.order_by(Category.kind, Category.group_name).all():
+            key = (cat.kind, cat.group_name)
+            if key not in seen:
+                seen.add(key)
+                groups.append(Group(kind=cat.kind, name=cat.group_name))
+        db.session.add_all(groups)
 
     if not Vehicle.query.first():
         db.session.add_all([

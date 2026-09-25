@@ -2,10 +2,88 @@
 {% block title %}P&L reports · K.Y.S. Finance{% endblock %}
 {% block page_title %}P&amp;L reports{% endblock %}
 {% block content %}
-<section class="hero-row compact"><div><span class="eyebrow">Cash basis only</span><h1>Profit &amp; loss reporting</h1><p>Only actual money received and actually paid in the selected period is included.</p></div><a class="btn excel" href="{{ url_for('reports_export', type=report_type, start=start, end=end) }}">↓ Export Excel</a></section>
-<form class="filters card" method="get"><label>Report<select name="type"><option value="monthly" {{ 'selected' if report_type == 'monthly' }}>Monthly Cash-Based P&amp;L</option><option value="short" {{ 'selected' if report_type == 'short' }}>Short Summary P&amp;L</option><option value="direct" {{ 'selected' if report_type == 'direct' }}>Direct Trade P&amp;L</option><option value="rental" {{ 'selected' if report_type == 'rental' }}>Rented Building P&amp;L</option><option value="construction" {{ 'selected' if report_type == 'construction' }}>Construction Projects P&amp;L</option></select></label><label>From<input type="date" name="start" value="{{ start }}"></label><label>To<input type="date" name="end" value="{{ end }}"></label><button class="btn secondary" type="submit">Generate</button></form>
-<section class="report-strip"><article><span>Liquid income</span><strong>Rs. {{ data.income|money }}</strong></article><b>−</b><article><span>Expenditure</span><strong>Rs. {{ data.expense|money }}</strong></article><b>=</b><article class="result"><span>Liquid P/L</span><strong class="{{ 'negative' if data.pl < 0 }}">Rs. {{ data.pl|money }}</strong></article></section>
-<article class="card table-card"><div class="card-head"><div><span class="eyebrow">{{ start.strftime('%d %b %Y') }} — {{ end.strftime('%d %b %Y') }}</span><h2>Summary by particular</h2></div></div>{% if data.summary %}<div class="table-wrap"><table><thead><tr><th>Particular</th><th class="number">Income</th><th class="number">Expenditure</th><th class="number">Liquid P/L</th></tr></thead><tbody>{% for item in data.summary %}<tr><td><b>{{ item.label }}</b></td><td class="number income-text">{{ item.income|money }}</td><td class="number expense-text">{{ item.expense|money }}</td><td class="number"><b class="{{ 'negative' if item.pl < 0 }}">{{ item.pl|money }}</b></td></tr>{% endfor %}</tbody><tfoot><tr><td>Total</td><td class="number">{{ data.income|money }}</td><td class="number">{{ data.expense|money }}</td><td class="number">{{ data.pl|money }}</td></tr></tfoot></table></div>{% else %}<div class="empty"><span>▥</span><h3>No reportable activity</h3><p>There are no matching cash entries in the selected period.</p></div>{% endif %}</article>
-{% if report_type != 'short' and data.rows %}<details class="card detail-disclosure"><summary>View detailed ledger <span>{{ data.rows|length }} entries</span></summary><div class="table-wrap"><table><thead><tr><th>Date</th><th>Reference</th><th>Particular</th><th>Counterparty</th><th class="number">Cash total</th></tr></thead><tbody>{% for row in data.rows %}<tr><td>{{ row.Date }}</td><td>{{ row.Reference }}</td><td>{{ row.Particular }}<small class="cell-note">{{ row.Group }}</small></td><td>{{ row.Counterparty }}</td><td class="number">{{ row['Cash Total']|money }}</td></tr>{% endfor %}</tbody></table></div></details>{% endif %}
+<link rel="stylesheet" href="{{ url_for('static', filename='reports.css') }}">
+<section class="hero-row compact">
+  <div><span class="eyebrow">Cash basis only</span><h1>Profit &amp; loss reporting</h1><p>Only actual money received and actually paid in the selected period is included.</p></div>
+  <a class="btn excel" href="{{ url_for('reports_export', type=report_type, start=start, end=end, group=selected_groups) }}">↓ Export Excel</a>
+</section>
+<form class="card report-controls" method="get">
+  <div class="filters">
+    <label>Report<select name="type">
+      {% for value, label in [('monthly', 'Monthly Cash-Based P&L'), ('short', 'Short Summary P&L')] %}
+      <option value="{{ value }}" {{ 'selected' if report_type == value }}>{{ label }}</option>
+      {% endfor %}
+    </select></label>
+    <label>From<input type="date" name="start" value="{{ start }}" required></label>
+    <label>To<input type="date" name="end" value="{{ end }}" required></label>
+    <button class="btn secondary" type="submit">Generate</button>
+  </div>
+  <details class="group-picker" open>
+    <summary>Select groups for this report <span>{{ (selected_groups|length|string + ' selected') if selected_groups else 'All groups' }}</span></summary>
+    <p>Select groups, then click Generate to include only those groups. Leave all unchecked for all groups with cash entries in the selected period.</p>
+    <button class="text-link" type="button" id="clear-report-groups">Clear selection / all groups</button>
+    <div class="group-options">
+    {% for kind, label in [('income', 'Income groups'), ('expense', 'Expenditure groups')] %}
+      <fieldset><legend>{{ label }}</legend>
+      {% for group in groups if group.kind == kind %}
+        <label class="check"><input type="checkbox" name="group" value="{{ group.key }}" {{ 'checked' if group.key in selected_groups }}><span>{{ group.name }}</span></label>
+      {% endfor %}
+      </fieldset>
+    {% endfor %}
+    </div>
+  </details>
+</form>
+<section class="report-strip"><article><span>Total liquid income</span><strong>Rs. {{ data.income|money }}</strong></article><b>−</b><article><span>Total expenditure</span><strong>Rs. {{ data.expense|money }}</strong></article><b>=</b><article class="result"><span>Liquid P/L</span><strong class="{{ 'negative' if data.pl < 0 }}">Rs. {{ data.pl|money }}</strong></article></section>
+<article class="card table-card group-statement">
+  <div class="card-head"><div><span class="eyebrow">{{ start.strftime('%d %b %Y') }} — {{ end.strftime('%d %b %Y') }}</span><h2>{{ 'Group summary' if report_type == 'short' else 'Income & expenditure particulars' }}</h2><p class="report-scope">{% if selected_groups %}{% for group in groups if group.key in selected_groups %}{{ group.kind|title }}: {{ group.name }}{{ '; ' if not loop.last }}{% endfor %}{% else %}All groups{% endif %} · LKR</p></div></div>
+  {% if not data.rows %}<p class="report-notice">No matching cash entries in this period for the selected groups.</p>
+  {% elif report_type == 'short' %}
+  <div class="table-wrap"><table class="particulars-table">
+    <thead><tr><th>Group</th><th class="number">Amount (LKR)</th></tr></thead>
+    {% for section in data.sections if section.groups %}
+    <tbody><tr class="statement-section"><th colspan="2">{{ section.label }}</th></tr>
+    {% for group in section.groups %}<tr class="statement-subtotal"><td><b>{{ group.name }}</b></td><td class="number">{{ group.totals['Cash Total']|money }}</td></tr>{% endfor %}
+    <tr class="statement-total"><td>Total {{ section.label }}</td><td class="number">{{ section.totals['Cash Total']|money }}</td></tr></tbody>
+    {% endfor %}
+    <tfoot><tr><td>Liquid P/L</td><td class="number">{{ data.pl|money }}</td></tr></tfoot>
+  </table></div>
+  {% else %}
+  <div class="table-wrap"><table class="particulars-table">
+    <thead><tr><th>No.</th><th>Group / Particular</th><th>A/C code</th><th class="number">Amount (LKR)</th><th class="number">Total (LKR)</th></tr></thead>
+    {% for section in data.sections if section.groups %}
+    <tbody>
+      <tr class="statement-section"><th colspan="5">{{ section.label }} Particulars</th></tr>
+      {% for group in section.groups %}
+      <tr class="statement-group"><th colspan="5">{{ group.name }}</th></tr>
+      {% if report_type != 'short' %}
+      {% for item in group['items'] %}
+      <tr><td>{{ loop.index }}</td><td>{{ item.name }}</td><td class="account-code">{{ item.code }}</td><td class="number">{{ item.amounts['Cash Total']|money }}</td><td></td></tr>
+      {% endfor %}
+      {% endif %}
+      <tr class="statement-subtotal"><td colspan="4">{{ group.name }} — Total</td><td class="number">{{ group.totals['Cash Total']|money }}</td></tr>
+      {% endfor %}
+      <tr class="statement-total"><td colspan="4">Total {{ section.label }}</td><td class="number">{{ section.totals['Cash Total']|money }}</td></tr>
+    </tbody>
+    {% endfor %}
+    <tfoot><tr><td colspan="4">Liquid P/L <small>(Total Income − Total Expenditure)</small></td><td class="number">{{ data.pl|money }}</td></tr></tfoot>
+  </table></div>
+  {% endif %}
+</article>
+{% if report_type in ['direct', 'rental'] and data.summary %}
+<article class="card table-card detail-disclosure"><h2>{{ 'Service' if report_type == 'direct' else 'Property' }} profitability</h2><div class="table-wrap"><table><thead><tr><th>Particular</th><th class="number">Income</th><th class="number">Expenditure</th><th class="number">Liquid P/L</th></tr></thead><tbody>{% for item in data.summary %}<tr><td>{{ item.label }}</td><td class="number">{{ item.income|money }}</td><td class="number">{{ item.expense|money }}</td><td class="number">{{ item.pl|money }}</td></tr>{% endfor %}</tbody></table></div></article>
+{% endif %}
+{% if report_type != 'short' and data.rows %}
+<details class="card detail-disclosure"><summary>View detailed ledger <span>{{ data.rows|length }} entries</span></summary><div class="table-wrap"><table><thead><tr><th>Date</th><th>Reference</th><th>Particular</th><th>Counterparty</th><th class="number">Cash total</th></tr></thead><tbody>{% for row in data.rows %}<tr><td>{{ row.Date }}</td><td>{{ row.Reference }}</td><td>{{ row.Particular }}<small class="cell-note">{{ row.Group }}</small></td><td>{{ row.Counterparty }}</td><td class="number">{{ row['Cash Total']|money }}</td></tr>{% endfor %}</tbody></table></div></details>
+{% endif %}
+<script>
+function updateGroupCount() {
+  var count = document.querySelectorAll('.group-picker input:checked').length;
+  document.querySelector('.group-picker summary span').textContent = count ? count + ' selected' : 'All groups';
+}
+document.getElementById('clear-report-groups').addEventListener('click', function () {
+  document.querySelectorAll('.group-picker input[name="group"]').forEach(function (input) { input.checked = false; });
+  updateGroupCount();
+});
+document.querySelector('.group-picker').addEventListener('change', updateGroupCount);
+</script>
 {% endblock %}
-
