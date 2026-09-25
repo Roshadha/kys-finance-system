@@ -16,4 +16,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Install the packaging dependency: .venv\Script
   --add-data "$(Join-Path $projectRoot 'static');static" `
   (Join-Path $projectRoot 'server.py')
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
+foreach ($name in @('COMPANY_SETUP.md', 'create-client-shortcut.ps1', 'Create Client Shortcut.cmd',
+        'Install KYS Finance Server.ps1', 'Install KYS Finance Server.cmd',
+        'Open KYS Finance on Server.url')) {
+  Copy-Item -LiteralPath (Join-Path $projectRoot $name) `
+    -Destination (Join-Path $projectRoot 'release\KYS Finance Server') -Force
+}
 Write-Host "Ready: $(Join-Path $projectRoot 'release\KYS Finance Server\KYS Finance Server.exe')"
