@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import sqlite3
 import sys
 import threading
@@ -859,10 +860,15 @@ def register_routes(app):
     @app.post("/backup")
     @role_required("admin")
     def backup_now():
-        path = make_backup(app)
+        path, external_path, external_error = make_backup(app, force_external=True)
         audit("backup", "database", None, path.name)
         db.session.commit()
-        flash(f"Backup created: {path.name}", "success")
+        if external_error:
+            flash(f"Local backup created, but the external backup failed: {external_error}", "error")
+        elif external_path:
+            flash(f"Backup created locally and at {external_path}", "success")
+        else:
+            flash(f"Local backup created: {path.name}. Configure an external backup for disaster recovery.", "success")
         return redirect(url_for("dashboard"))
 
     @app.route("/account/password", methods=["GET", "POST"])
@@ -893,7 +899,7 @@ def register_routes(app):
         return render_template("error.html", code=404, message="The requested record or page was not found."), 404
 
 
-def make_backup(app):
+def make_backup(app, force_external=False):
     database_uri = app.config["SQLALCHEMY_DATABASE_URI"]
     if not database_uri.startswith("sqlite:///"):
         raise RuntimeError("Automatic file backup is only available for SQLite.")
@@ -905,11 +911,54 @@ def make_backup(app):
     destination.parent.mkdir(exist_ok=True)
     with closing(sqlite3.connect(source)) as source_db, closing(sqlite3.connect(temporary)) as backup_db:
         source_db.backup(backup_db)
+        if backup_db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("SQLite backup integrity check failed.")
     temporary.replace(destination)
     backups = sorted(destination.parent.glob("kys_finance_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
     for old in backups[60:]:
         old.unlink(missing_ok=True)
-    return destination
+    external_path = None
+    external_error = None
+    if (DATA_ROOT / "backup-target.txt").exists():
+        try:
+            external_path = copy_external_backup(destination, force=force_external)
+        except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
+            external_error = str(exc)
+            app.logger.exception("External backup failed; local backup remains available")
+    return destination, external_path, external_error
+
+
+def copy_external_backup(local_backup, force=False):
+    target = Path((DATA_ROOT / "backup-target.txt").read_text(encoding="utf-8-sig").strip())
+    if not target.is_absolute() or not target.is_dir():
+        raise RuntimeError("Configured external backup folder is unavailable.")
+    if target.resolve() == DATA_ROOT.resolve() or DATA_ROOT.resolve() in target.resolve().parents:
+        raise RuntimeError("External backup folder must be outside the application folder.")
+    day = datetime.now().strftime("%Y-%m-%d")
+    stamp = datetime.now().strftime("%H%M%S_%f")
+    backup_dir = target / "KYS-Finance-Backups" / (f"{day}_{stamp}" if force else day)
+    complete = backup_dir / "backup-complete.txt"
+    if (not force and complete.exists() and (backup_dir / "kys_finance.db").exists()
+            and (backup_dir / ".secret_key").exists()):
+        return backup_dir
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    temporary = backup_dir / "kys_finance.db.tmp"
+    shutil.copy2(local_backup, temporary)
+    with closing(sqlite3.connect(temporary)) as check_db:
+        if check_db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("External backup integrity check failed.")
+    temporary.replace(backup_dir / "kys_finance.db")
+    secret = DATA_ROOT / "data" / ".secret_key"
+    secret_temp = backup_dir / ".secret_key.tmp"
+    if secret.exists():
+        shutil.copy2(secret, secret_temp)
+    elif os.environ.get("KYS_SECRET_KEY"):
+        secret_temp.write_text(os.environ["KYS_SECRET_KEY"], encoding="utf-8")
+    else:
+        raise RuntimeError("Session secret is unavailable for the external backup.")
+    secret_temp.replace(backup_dir / ".secret_key")
+    complete.write_text(f"Verified {datetime.now().isoformat(timespec='seconds')}\n", encoding="utf-8")
+    return backup_dir
 
 
 def start_backup_worker(app):
@@ -919,11 +968,11 @@ def start_backup_worker(app):
 
     def worker():
         while True:
-            time.sleep(2 * 60 * 60)
             try:
                 make_backup(app)
             except Exception:
                 app.logger.exception("Scheduled backup failed")
+            time.sleep(2 * 60 * 60)
 
     threading.Thread(target=worker, daemon=True, name="sqlite-backup").start()
 

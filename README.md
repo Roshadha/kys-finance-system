@@ -4,7 +4,7 @@ A lightweight local-network accounting application for actual cash receipts and 
 
 ## Start on Windows
 
-Use the [Windows server release](https://github.com/Roshadha/kys-finance-system/releases) for a Python-free deployment, then follow [COMPANY_SETUP.md](COMPANY_SETUP.md). The EXE runs only on the server PC; other computers use a browser shortcut.
+Use the [Windows server release](https://github.com/Roshadha/kys-finance-system/releases) for a Python-free deployment, then follow [COMPANY_SETUP.md](COMPANY_SETUP.md). The EXE runs only on the server PC; other computers use a browser shortcut. The installer enables auto-start when the server's Windows user signs in. Configure a separate USB/NAS backup location before entering company data.
 
 To run from source instead:
 
@@ -31,7 +31,7 @@ Change all temporary passwords immediately from the settings icon after signing 
 - Saved ledger entries cannot be edited or deleted.
 - Administrators correct entries through signed adjustments, preserving the original.
 - Every sign-in, entry, adjustment, user change, export, and backup is written to audit history.
-- Automatic SQLite backups run every two hours while the server is running. Administrators can also create an immediate backup from the dashboard.
+- Verified SQLite backups run when the server starts and every two hours while it is running. Administrators can create an immediate backup from the dashboard. A configured external drive/NAS receives a daily second copy for disaster recovery.
 - Monthly and short summary reports can be filtered by income and expenditure groups and exported to Excel.
 
 ## Configuration

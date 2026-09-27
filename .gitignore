@@ -7,8 +7,8 @@ kys-finance-group-reports.zip
 KYS-Finance-Company-Server-Windows*.zip
 __pycache__/
 .pytest_cache/
-data/*.db
-data/.secret_key
+data/
+backup-target.txt
 backups/*.db
 workbook_previews/
 node_modules/
