@@ -1,0 +1,74 @@
+/* K.Y.S. palette: Signal Blue and Porcelain. Dark blue text and transparent blue
+   overlays keep the two-colour design readable without the former green theme. */
+:root {
+  --ink: #102a5c;
+  --muted: #536789;
+  --line: rgba(0, 87, 255, .18);
+  --paper: #f8f7f4;
+  --white: #f8f7f4;
+  --green: #0057ff;
+  --green-2: #0057ff;
+  --mint: rgba(0, 87, 255, .09);
+  --lime: #f8f7f4;
+  --red: #0057ff;
+  --red-bg: rgba(0, 87, 255, .07);
+  --gold: #0057ff;
+  --shadow: 0 12px 40px rgba(0, 87, 255, .08);
+}
+
+body, .auth-body, .topbar { background: var(--paper); }
+.sidebar, .login-panel, .report-strip, .kpi.profit { background: #0057ff; color: #f8f7f4; }
+.sidebar { box-shadow: 8px 0 24px rgba(0, 87, 255, .08); }
+.brand-mark { background: #f8f7f4; color: #0057ff; }
+.brand small, .login-brand small, .sidebar nav a, .sidebar nav a span,
+.sidebar-user small, .nav-label, .login-copy p, .login-foot, .pill,
+.equation, .kpi.profit > span, .kpi.profit small, .report-strip span,
+.report-strip > b { color: rgba(248, 247, 244, .82); }
+.sidebar nav a:hover, .sidebar nav a.active { background: rgba(248, 247, 244, .18); color: #f8f7f4; }
+.sidebar nav a.active span, .login-copy h1 em, .equation b { color: #f8f7f4; }
+.sidebar-user { border-top-color: rgba(248, 247, 244, .25); }
+.avatar { background: #f8f7f4; color: #0057ff; }
+.eyebrow, .link-button, .icon-link, .quick-list span, .text-link,
+.row-action, .income-text, .expense-text, .negative { color: #0057ff !important; }
+.icon-link, .card, .kpi, input, select, textarea, .group-options fieldset {
+  border-color: var(--line);
+  background: #f8f7f4;
+}
+.card, .kpi { box-shadow: var(--shadow); }
+.btn.primary, .btn.excel { background: #0057ff; color: #f8f7f4; box-shadow: 0 8px 20px rgba(0, 87, 255, .18); }
+.btn.secondary { border-color: #0057ff; background: #f8f7f4; color: #0057ff; }
+.btn.ghost { color: #0057ff; }
+.btn:hover { filter: brightness(.94); }
+.kpi.profit:after { background: rgba(248, 247, 244, .1); }
+.kpi-icon, .expense .kpi-icon, .vehicle-badge, .status.income,
+.status.expense, .record-summary .highlight { background: var(--mint); color: #0057ff; }
+.profit .kpi-icon { background: rgba(248, 247, 244, .18); color: #f8f7f4; }
+.kpi > span, .kpi small, .bar-group span, .cell-note, .cell-note.warning,
+.optional, .vehicle-field small, label small, .timeline-item p,
+.timeline-item small, .account-code { color: var(--muted); }
+.legend .in, .bar.in { background: #0057ff; }
+.legend .out, .bar.out { background: rgba(0, 87, 255, .35); }
+.bar-chart { border-bottom-color: var(--line); background: repeating-linear-gradient(to bottom, transparent 0, transparent 53px, rgba(0, 87, 255, .08) 54px); }
+.quick-list a, .quick-list button, td { border-bottom-color: var(--line); }
+tbody tr:hover { background: rgba(0, 87, 255, .04); }
+th, label, .task-fieldset legend { color: var(--ink); }
+input:focus, select:focus, textarea:focus { border-color: #0057ff; box-shadow: 0 0 0 3px rgba(0, 87, 255, .12); }
+input[type="checkbox"], input[type="radio"] { accent-color: #0057ff; }
+.locked-note, .login-help, .tag-list span, .tag, .status,
+.status.disabled, .report-notice { background: var(--mint); color: var(--muted); }
+.login-help b { color: var(--ink); }
+.report-strip .result { background: rgba(248, 247, 244, .16); }
+.report-strip span, .report-strip > b { color: rgba(248, 247, 244, .86); }
+.timeline-item { border-left-color: var(--line); }
+.timeline-dot { border-color: #f8f7f4; background: #0057ff; box-shadow: 0 0 0 1px #0057ff; }
+.flash, .flash.error { border-color: var(--line); background: #f8f7f4; color: #0057ff; }
+.error-page > span, .empty > span { color: rgba(0, 87, 255, .45); }
+.login-panel:after { border-color: rgba(248, 247, 244, .18); }
+.pill, .equation { background: rgba(248, 247, 244, .14); }
+.equation { border-color: rgba(248, 247, 244, .2); }
+
+@media (max-width: 850px) {
+  .login-shell { grid-template-columns: 1fr; }
+  .login-panel { display: none; }
+  .login-form-wrap { padding: 28px 20px; }
+}
