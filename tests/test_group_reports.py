@@ -21,7 +21,7 @@ class GroupReportTests(unittest.TestCase):
         with self.app.app_context():
             for kind, amount in [('income', 115), ('expense', 40)]:
                 db.session.add(Group(kind=kind, name='Custom group', active=False))
-                cat = Category(kind=kind, group_name='Custom group', code='999', name=kind + ' account', active=False)
+                cat = Category(kind=kind, group_name='Custom group', name=kind + ' account', active=False)
                 db.session.add(cat)
                 db.session.flush()
                 txn = Transaction(category_id=cat.id, cash_date=self.day, reference=kind,
@@ -32,8 +32,8 @@ class GroupReportTests(unittest.TestCase):
                 if kind == 'income':
                     db.session.add(Adjustment(transaction_id=txn.id, effective_date=self.day,
                                               amount=-5, reason='Correction', created_by_id=1))
-            db.session.add(Category(kind='income', group_name='Custom group', code='999', name='Zero account'))
-            other = Category.query.filter_by(code='351').first()
+            db.session.add(Category(kind='income', group_name='Custom group', name='Zero account'))
+            other = Category.query.filter_by(kind='income', name='Security Service Income').first()
             db.session.add(Transaction(category_id=other.id, cash_date=self.day, reference='excluded',
                                        counterparty='Other', subtotal=800, total=800, created_by_id=1))
             db.session.commit()
@@ -77,7 +77,9 @@ class GroupReportTests(unittest.TestCase):
         labels = [row[1] for row in rows]
         self.assertLess(labels.index('Total Income'), labels.index('Expenditure Particulars'))
         self.assertLess(labels.index('Total Expenditure'), labels.index('Liquid P/L'))
-        self.assertIn((1, 'income account', '999', 110, None), rows)
+        with self.app.app_context():
+            income_code = Category.query.filter_by(kind='income', name='income account').one().id
+        self.assertIn((1, 'income account', income_code, 110, None), rows)
         html = response.data.decode()
         self.assertLess(html.index('Income Particulars'), html.index('Expenditure Particulars'))
         self.assertLess(html.index('class="report-strip"'), html.index('Income Particulars'))

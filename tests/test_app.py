@@ -48,7 +48,7 @@ class FinanceAppTests(unittest.TestCase):
     def test_locked_transaction_adjustment_and_excel_export(self):
         self.login()
         with self.app.app_context():
-            category_id = Category.query.filter_by(code="351", kind="income").first().id
+            category_id = Category.query.filter_by(kind="income", name="Security Service Income").first().id
         response = self.client.post("/transactions/new?kind=income", data={
             "csrf_token": self.csrf(), "kind": "income", "group_name": "Trade Income", "category_id": category_id,
             "cash_date": date.today().isoformat(), "reference": "TEST-001",
@@ -81,8 +81,8 @@ class FinanceAppTests(unittest.TestCase):
     def test_group_account_selection_and_optional_reference_counterparty(self):
         self.login()
         with self.app.app_context():
-            income = Category.query.filter_by(code="351", kind="income").first()
-            expense = Category.query.filter_by(code="501", kind="expense").first()
+            income = Category.query.filter_by(kind="income", name="Security Service Income").first()
+            expense = Category.query.filter_by(kind="expense", name="Office Expenditure").first()
             account_ids = (("income", income.group_name, income.id),
                            ("expense", expense.group_name, expense.id))
         for kind, group, account_id in account_ids:
@@ -108,7 +108,7 @@ class FinanceAppTests(unittest.TestCase):
     def test_grouped_money_input_is_saved_at_its_numeric_value(self):
         self.login()
         with self.app.app_context():
-            category = Category.query.filter_by(code="501", kind="expense").first()
+            category = Category.query.filter_by(kind="expense", name="Office Expenditure").first()
             category_id, group_name = category.id, category.group_name
         page = self.client.get("/transactions/new?kind=expense")
         self.assertIn(b'placeholder="0.00"', page.data)
