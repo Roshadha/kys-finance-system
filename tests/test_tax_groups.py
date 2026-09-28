@@ -75,3 +75,49 @@ class TaxGroupTests(unittest.TestCase):
         export = self.client.get("/reports/export?" + query)
         self.assertEqual(export.status_code, 200)
         self.assertEqual(export.data[:2], b"PK")
+
+
+class SequentialIdTests(unittest.TestCase):
+    login = test_app.FinanceAppTests.login
+    csrf = test_app.FinanceAppTests.csrf
+
+    def setUp(self):
+        test_app.FinanceAppTests.setUp(self)
+        self.login()
+
+    def test_seeded_ids_follow_the_sequence(self):
+        with self.app.app_context():
+            groups = {g.name: g.id for g in Group.query.all()}
+            # Income groups: IG_, +100 each. Expenditure groups: EG_, +100 each.
+            self.assertEqual(groups["Trade Income"], "IG_100")
+            self.assertEqual(groups["Bank Interest Income"], "IG_200")
+            self.assertEqual(groups["Rental Income"], "IG_300")
+            self.assertEqual(groups["Direct Trade Expenditure"], "EG_100")
+            self.assertEqual(groups["Operational Expenditure"], "EG_200")
+
+            # Income particulars: IP_, +10 each. Expenditure particulars: EP_, +10 each.
+            income_ids = sorted(c.id for c in Category.query.filter_by(kind="income").all())
+            expense_ids = sorted(c.id for c in Category.query.filter_by(kind="expense").all())
+            self.assertEqual(income_ids[0], "IP_0010")
+            self.assertEqual(income_ids[1], "IP_0020")
+            self.assertEqual(income_ids[2], "IP_0030")
+            self.assertEqual(expense_ids[0], "EP_0010")
+            self.assertEqual(expense_ids[1], "EP_0020")
+            self.assertEqual(expense_ids[2], "EP_0030")
+            all_ids = income_ids + expense_ids
+            self.assertEqual(len(set(all_ids)), len(all_ids))
+            self.assertTrue(all(c.group_id for c in Category.query.all()))
+
+    def test_new_group_and_particular_get_next_ids(self):
+        with self.app.app_context():
+            last_group = max(int(g.id[3:]) for g in Group.query.filter_by(kind="income").all())
+            last_cat = max(int(c.id[3:]) for c in Category.query.filter_by(kind="income").all())
+        self.client.post("/groups", data={"csrf_token": self.csrf(), "kind": "income", "name": "Other Income"})
+        self.client.post("/categories", data={"csrf_token": self.csrf(), "kind": "income",
+                                              "group_name": "Other Income", "name": "Misc receipt"})
+        with self.app.app_context():
+            group = Group.query.filter_by(name="Other Income").one()
+            cat = Category.query.filter_by(name="Misc receipt").one()
+            self.assertEqual(group.id, f"IG_{last_group + 100}")
+            self.assertEqual(cat.id, f"IP_{last_cat + 10:04d}")
+            self.assertEqual(cat.group_id, group.id)
