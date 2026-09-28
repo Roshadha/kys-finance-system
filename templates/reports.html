@@ -24,11 +24,11 @@
     <button class="text-link" type="button" id="clear-report-groups">Clear selection / all groups</button>
     <div class="group-options">
     {% for kind, label in [('income', 'Income groups'), ('expense', 'Expenditure groups')] %}
-      <fieldset><legend>{{ label }}</legend>
+      <details class="group-dropdown"><summary>{{ label }} <span data-group-count="{{ kind }}">All</span></summary><div class="group-dropdown-list">
       {% for group in groups if group.kind == kind %}
-        <label class="check"><input type="checkbox" name="group" value="{{ group.key }}" {{ 'checked' if group.key in selected_groups }}><span>{{ group.name }}</span></label>
+        <label class="check"><input type="checkbox" name="group" data-kind="{{ kind }}" value="{{ group.key }}" {{ 'checked' if group.key in selected_groups }}><span>{{ group.name }}</span></label>
       {% endfor %}
-      </fieldset>
+      </div></details>
     {% endfor %}
     </div>
   </details>
@@ -79,11 +79,16 @@
 function updateGroupCount() {
   var count = document.querySelectorAll('.group-picker input:checked').length;
   document.querySelector('.group-picker summary span').textContent = count ? count + ' selected' : 'All groups';
+  document.querySelectorAll('[data-group-count]').forEach(function (label) {
+    var selected = document.querySelectorAll('.group-picker input[data-kind="' + label.dataset.groupCount + '"]:checked').length;
+    label.textContent = selected ? selected + ' selected' : 'All';
+  });
 }
 document.getElementById('clear-report-groups').addEventListener('click', function () {
   document.querySelectorAll('.group-picker input[name="group"]').forEach(function (input) { input.checked = false; });
   updateGroupCount();
 });
 document.querySelector('.group-picker').addEventListener('change', updateGroupCount);
+updateGroupCount();
 </script>
 {% endblock %}

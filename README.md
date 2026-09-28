@@ -28,6 +28,7 @@ Change all temporary passwords immediately from the settings icon after signing 
 ## Accounting controls
 
 - Cash date is the date money was actually received or paid.
+- Trade Income entries use Sub total only. Record tax cash movements separately under the **Inward Taxes** income group or **Tax Expenditure** expenditure group, each with **SSCL** and **VAT** particulars. Both groups can be selected independently in report dropdowns.
 - Saved ledger entries cannot be edited or deleted.
 - Administrators correct entries through signed adjustments, preserving the original.
 - Every sign-in, entry, adjustment, user change, export, and backup is written to audit history.

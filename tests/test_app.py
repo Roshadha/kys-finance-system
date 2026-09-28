@@ -53,12 +53,12 @@ class FinanceAppTests(unittest.TestCase):
             "csrf_token": self.csrf(), "kind": "income", "group_name": "Trade Income", "category_id": category_id,
             "cash_date": date.today().isoformat(), "reference": "TEST-001",
             "counterparty": "Test Customer", "description": "Cash receipt",
-            "subtotal": "100000", "sscl": "2500", "vat": "18000",
+            "subtotal": "100000",
         })
         self.assertEqual(response.status_code, 302)
         with self.app.app_context():
             txn = Transaction.query.filter_by(reference="TEST-001").one()
-            self.assertEqual(float(txn.total), 120500)
+            self.assertEqual(float(txn.total), 100000)
             txn_id = txn.id
         response = self.client.post(f"/transactions/{txn_id}/adjust", data={
             "csrf_token": self.csrf(), "effective_date": date.today().isoformat(),
@@ -67,7 +67,7 @@ class FinanceAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         with self.app.app_context():
             self.assertEqual(Adjustment.query.filter_by(transaction_id=txn_id).count(), 1)
-            self.assertEqual(db.session.get(Transaction, txn_id).adjusted_total, 115500)
+            self.assertEqual(db.session.get(Transaction, txn_id).adjusted_total, 95000)
         export = self.client.get(f"/reports/export?type=monthly&start={date.today()}&end={date.today()}")
         self.assertEqual(export.status_code, 200)
         self.assertEqual(export.data[:2], b"PK")
@@ -108,13 +108,13 @@ class FinanceAppTests(unittest.TestCase):
     def test_grouped_money_input_is_saved_at_its_numeric_value(self):
         self.login()
         with self.app.app_context():
-            category = Category.query.filter_by(code="351", kind="income").first()
+            category = Category.query.filter_by(code="501", kind="expense").first()
             category_id, group_name = category.id, category.group_name
-        page = self.client.get("/transactions/new?kind=income")
+        page = self.client.get("/transactions/new?kind=expense")
         self.assertIn(b'placeholder="0.00"', page.data)
         self.assertNotIn(b'value="0.00"', page.data)
-        response = self.client.post("/transactions/new?kind=income", data={
-            "csrf_token": self.csrf(), "kind": "income", "group_name": group_name,
+        response = self.client.post("/transactions/new?kind=expense", data={
+            "csrf_token": self.csrf(), "kind": "expense", "group_name": group_name,
             "category_id": category_id, "cash_date": date.today().isoformat(),
             "subtotal": "500,000.00", "sscl": "2,500.00", "vat": "18,000.00",
         })

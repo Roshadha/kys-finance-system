@@ -30,9 +30,23 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const category = document.getElementById('categorySelect');
   const transactionGroup = document.getElementById('transactionGroupSelect');
+  const taxAmountRow = document.getElementById('taxAmountRow');
+  const updateTaxFields = () => {
+    if (!transactionGroup || !taxAmountRow) return;
+    const subtotalOnly = transactionGroup.options[transactionGroup.selectedIndex]?.dataset.subtotalOnly === '1';
+    taxAmountRow.hidden = subtotalOnly;
+    ['sscl', 'vat'].forEach(id => {
+      const input = document.getElementById(id);
+      if (!input) return;
+      if (subtotalOnly) input.value = '';
+      input.disabled = subtotalOnly;
+    });
+    updateTotal();
+  };
   const accountOptions = category ? Array.from(category.options).slice(1).map(option => option.cloneNode(true)) : [];
   const updateAccounts = () => {
     if (!category || !transactionGroup) return;
+    updateTaxFields();
     const previous = category.value;
     category.replaceChildren(new Option(transactionGroup.value ? 'Select an account' : 'Select a group first', ''));
     accountOptions.filter(option => option.dataset.group === transactionGroup.value).forEach(option => category.add(option.cloneNode(true)));

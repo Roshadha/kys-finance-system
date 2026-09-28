@@ -46,6 +46,11 @@ TASKS = {
     "view_reports": "View reports",
 }
 ROLES = {"admin": "Administrator", "data_entry": "Data Entry", "management": "Management"}
+SUBTOTAL_ONLY_GROUPS = {
+    ("income", "Trade Income"),
+    ("income", "Inward Taxes"),
+    ("expense", "Tax Expenditure"),
+}
 
 
 def utc_now():
@@ -593,6 +598,8 @@ def register_routes(app):
                 subtotal = parse_money(request.form.get("subtotal"))
                 sscl = parse_money(request.form.get("sscl"))
                 vat = parse_money(request.form.get("vat"))
+                if (requested_kind, selected_group) in SUBTOTAL_ONLY_GROUPS and (sscl or vat):
+                    raise ValueError("Enter SSCL and VAT as separate tax particulars, not in these amount fields.")
                 if min(subtotal, sscl, vat) < 0:
                     raise ValueError("Amounts cannot be negative.")
                 total = round(subtotal + sscl + vat, 2)
@@ -618,7 +625,9 @@ def register_routes(app):
             except (ValueError, TypeError) as exc:
                 db.session.rollback()
                 flash(str(exc), "error")
-        return render_template("transaction_form.html", kind=requested_kind, categories=categories, vehicles=vehicles)
+        subtotal_only_groups = {name for kind, name in SUBTOTAL_ONLY_GROUPS if kind == requested_kind}
+        return render_template("transaction_form.html", kind=requested_kind, categories=categories,
+                               vehicles=vehicles, subtotal_only_groups=subtotal_only_groups)
 
     @app.route("/transactions/<int:transaction_id>/adjust", methods=["GET", "POST"])
     @role_required("admin")
@@ -1058,6 +1067,14 @@ def seed_database():
                 seen.add(key)
                 groups.append(Group(kind=cat.kind, name=cat.group_name))
         db.session.add_all(groups)
+
+    # Apply new tax accounts to both fresh and existing company databases.
+    for kind, group_name in (("income", "Inward Taxes"), ("expense", "Tax Expenditure")):
+        if not Group.query.filter_by(kind=kind, name=group_name).first():
+            db.session.add(Group(kind=kind, name=group_name))
+        for particular in ("SSCL", "VAT"):
+            if not Category.query.filter_by(kind=kind, group_name=group_name, name=particular).first():
+                db.session.add(Category(kind=kind, group_name=group_name, name=particular))
 
     if not Vehicle.query.first():
         db.session.add_all([

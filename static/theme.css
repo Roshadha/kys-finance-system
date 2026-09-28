@@ -66,6 +66,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #0057ff; }
 .login-panel:after { border-color: rgba(248, 247, 244, .18); }
 .pill, .equation { background: rgba(248, 247, 244, .14); }
 .equation { border-color: rgba(248, 247, 244, .2); }
+.tax-row[hidden] { display: none; }
 
 @media (max-width: 850px) {
   .login-shell { grid-template-columns: 1fr; }
