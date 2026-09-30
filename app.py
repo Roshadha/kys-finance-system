@@ -29,7 +29,10 @@ from flask import (
 from flask_sqlalchemy import SQLAlchemy
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from sqlalchemy import func
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from sqlalchemy.schema import CreateIndex, CreateTable
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -82,8 +85,16 @@ class User(db.Model):
         self.password_hash = generate_password_hash(password)
 
 
+# Primary keys double as the visible codes.
+# Groups: IG_100, IG_200 ... (income) and EG_100, EG_200 ... (expenditure), +100 each.
+# Particulars: IP_0010, IP_0020 ... (income) and EP_0010, EP_0020 ... (expenditure), +10 each.
+GROUP_PREFIX = {"income": "IG", "expense": "EG"}
+CATEGORY_PREFIX = {"income": "IP", "expense": "EP"}
+ID_RULES = {"Group": (GROUP_PREFIX, 100, 0), "Category": (CATEGORY_PREFIX, 10, 4)}
+
+
 class Group(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.String(20), primary_key=True)
     kind = db.Column(db.String(20), nullable=False)
     name = db.Column(db.String(100), nullable=False)
     active = db.Column(db.Boolean, nullable=False, default=True)
@@ -91,8 +102,8 @@ class Group(db.Model):
 
 
 class Category(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    code = db.Column(db.String(20), nullable=True)
+    id = db.Column(db.String(20), primary_key=True)
+    group_id = db.Column(db.String(20), db.ForeignKey("group.id"), nullable=True, index=True)
     kind = db.Column(db.String(20), nullable=False)
     group_name = db.Column(db.String(100), nullable=False)
     name = db.Column(db.String(180), nullable=False)
@@ -112,7 +123,7 @@ class Vehicle(db.Model):
 class Transaction(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     cash_date = db.Column(db.Date, nullable=False, index=True)
-    category_id = db.Column(db.Integer, db.ForeignKey("category.id"), nullable=False, index=True)
+    category_id = db.Column(db.String(20), db.ForeignKey("category.id"), nullable=False, index=True)
     vehicle_id = db.Column(db.Integer, db.ForeignKey("vehicle.id"), nullable=True)
     reference = db.Column(db.String(80), nullable=False)
     counterparty = db.Column(db.String(140), nullable=False)
@@ -154,9 +165,179 @@ class AuditLog(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     action = db.Column(db.String(80), nullable=False)
     entity_type = db.Column(db.String(50), nullable=False)
-    entity_id = db.Column(db.Integer, nullable=True)
+    entity_id = db.Column(db.String(40), nullable=True)
     details = db.Column(db.Text, nullable=True)
     user = db.relationship("User")
+
+
+def format_id(prefix, number, width):
+    return f"{prefix}_{number:0{width}d}"
+
+
+def highest_id_number(session, model, prefix):
+    top = 0
+    for (value,) in session.execute(select(model.id)):
+        head, _, tail = str(value).partition("_")
+        if head == prefix and tail.isdigit():
+            top = max(top, int(tail))
+    return top
+
+
+@event.listens_for(Session, "before_flush")
+def assign_account_ids(session, flush_context, instances):
+    """Give every new group / particular the next code for its type."""
+    for model in (Group, Category):
+        pending = [obj for obj in session.new if isinstance(obj, model) and not obj.id]
+        if not pending:
+            continue
+        prefixes, step, width = ID_RULES[model.__name__]
+        tops = {}
+        for obj in pending:
+            prefix = prefixes[obj.kind]
+            if prefix not in tops:
+                with session.no_autoflush:
+                    tops[prefix] = highest_id_number(session, model, prefix)
+                for other in session.new:
+                    if isinstance(other, model) and other.id:
+                        head, _, tail = str(other.id).partition("_")
+                        if head == prefix and tail.isdigit():
+                            tops[prefix] = max(tops[prefix], int(tail))
+            tops[prefix] += step
+            obj.id = format_id(prefix, tops[prefix], width)
+
+
+# Order used to number groups of databases created before group IDs existed.
+LEGACY_GROUP_ORDER = [
+    ("income", "Trade Income"), ("income", "Bank Interest Income"), ("income", "Rental Income"),
+    ("income", "Construction Projects Income"), ("expense", "Direct Trade Expenditure"),
+    ("expense", "Operational Expenditure"), ("expense", "Maintenance Expenditure"),
+    ("expense", "Construction Projects Expenditure"), ("expense", "Investment Projects Expenditure"),
+    ("income", "Inward Taxes"), ("expense", "Tax Expenditure"),
+]
+
+
+def numeric_part(value):
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return int(digits) if digits else 0
+
+
+def migrate_integer_ids(engine, backup_directory=None):
+    """Atomically upgrade legacy IDs, preserving cash records and audit links."""
+    if engine.dialect.name != "sqlite":
+        return
+    db_path = engine.url.database
+    if not db_path or db_path == ":memory:" or not Path(db_path).exists():
+        return
+    con = sqlite3.connect(db_path, isolation_level=None, timeout=30)
+    migrated = False
+    try:
+        # Reserve the write lock before taking a snapshot or reading mapping data.
+        # A separate reader can still take a consistent SQLite backup (including WAL).
+        con.execute("BEGIN IMMEDIATE")
+        cols = {row[1]: (row[2] or "").upper() for row in con.execute("PRAGMA table_info(category)")}
+        if not cols or not (cols["id"].startswith("INT") or "code" in cols):
+            con.execute("ROLLBACK")
+            return
+        backup_dir = Path(backup_directory) if backup_directory else DATA_ROOT / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_file = backup_dir / f"pre-code-migration-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
+        with closing(sqlite3.connect(db_path)) as source, closing(sqlite3.connect(backup_file)) as snapshot:
+            source.backup(snapshot)
+            if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError("Migration backup failed validation; no accounts were changed.")
+
+        group_rows = con.execute('SELECT id, kind, name, active FROM "group"').fetchall()
+        rank = {key: i for i, key in enumerate(LEGACY_GROUP_ORDER)}
+        group_rows.sort(key=lambda r: (rank.get((r[1], r[2]), len(rank)), numeric_part(r[0])))
+        cat_rows = con.execute(
+            "SELECT id, kind, group_name, name, service_line, entity_name, active, code FROM category"
+        ).fetchall()
+        cat_rows.sort(key=lambda r: numeric_part(r[0]))
+
+        group_ids, old_group_ids, new_groups, counters = {}, {}, [], {}
+        def add_group(kind, name, active):
+            counters[kind] = counters.get(kind, 0) + 1
+            gid = format_id(GROUP_PREFIX[kind], counters[kind] * 100, 0)
+            group_ids[(kind, name)] = gid
+            new_groups.append((gid, kind, name, active))
+            return gid
+        for old_id, kind, name, active in group_rows:
+            old_group_ids[str(old_id)] = add_group(kind, name, active)
+        for _, kind, gname, *_rest in cat_rows:
+            if (kind, gname) not in group_ids:
+                add_group(kind, gname, 1)
+
+        cat_ids, legacy_codes, new_cats, counters = {}, {}, [], {}
+        for old_id, kind, gname, name, service, entity, active, code in cat_rows:
+            counters[kind] = counters.get(kind, 0) + 1
+            cid = format_id(CATEGORY_PREFIX[kind], counters[kind] * 10, 4)
+            cat_ids[str(old_id)] = cid
+            legacy_codes[str(old_id)] = code
+            new_cats.append((cid, group_ids[(kind, gname)], kind, gname, name, service, entity, active))
+
+        def read_table(name):
+            cursor = con.execute(f'SELECT * FROM "{name}"')
+            return [column[0] for column in cursor.description], cursor.fetchall()
+
+        txn_cols, txns = read_table("transaction")
+        audit_cols, audits = read_table("audit_log")
+        category_index = txn_cols.index("category_id")
+        converted_txns = []
+        for row in txns:
+            row = list(row)
+            row[category_index] = cat_ids[str(row[category_index])]
+            converted_txns.append(row)
+        entity_type_index = audit_cols.index("entity_type")
+        entity_id_index = audit_cols.index("entity_id")
+        converted_audits = []
+        for row in audits:
+            row = list(row)
+            value = row[entity_id_index]
+            mapping = {"category": cat_ids, "group": old_group_ids}.get(row[entity_type_index], {})
+            row[entity_id_index] = mapping.get(str(value), str(value)) if value is not None else None
+            converted_audits.append(row)
+
+        # All DDL and data changes participate in the same transaction. No user,
+        # vehicle or adjustment records are rebuilt.
+        for model in (Transaction, Category, Group, AuditLog):
+            con.execute(f'DROP TABLE "{model.__tablename__}"')
+        for model in (Group, Category, Transaction, AuditLog):
+            table = model.__table__
+            con.execute(str(CreateTable(table).compile(dialect=engine.dialect)))
+            for index in table.indexes:
+                con.execute(str(CreateIndex(index).compile(dialect=engine.dialect)))
+        con.executemany('INSERT INTO "group" (id, kind, name, active) VALUES (?,?,?,?)', new_groups)
+        con.executemany(
+            "INSERT INTO category (id, group_id, kind, group_name, name, service_line, entity_name, active) "
+            "VALUES (?,?,?,?,?,?,?,?)", new_cats)
+        for table_name, columns, rows in (
+                ("transaction", txn_cols, converted_txns), ("audit_log", audit_cols, converted_audits)):
+            marks = ",".join("?" * len(columns))
+            names = ",".join(f'"{column}"' for column in columns)
+            con.executemany(f'INSERT INTO "{table_name}" ({names}) VALUES ({marks})', rows)
+
+        # Keep old account codes as a historical cross-reference even though the
+        # UI now uses automatic IDs and no longer asks for a separate account code.
+        con.execute("CREATE TABLE account_code_migration ("
+                    "entity_type TEXT NOT NULL, old_id TEXT NOT NULL, new_id TEXT NOT NULL, "
+                    "legacy_code TEXT, PRIMARY KEY (entity_type, old_id))")
+        con.executemany("INSERT INTO account_code_migration VALUES (?,?,?,?)",
+                        [("group", old, new, None) for old, new in old_group_ids.items()] +
+                        [("category", old, new, legacy_codes[old]) for old, new in cat_ids.items()])
+        if con.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("Account migration found a broken data reference; changes were rolled back.")
+        if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise RuntimeError("Account migration failed integrity checks; changes were rolled back.")
+        con.execute("COMMIT")
+        migrated = True
+    except Exception:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+    if migrated:
+        engine.dispose()
 
 
 def create_app(test_config=None):
@@ -185,6 +366,7 @@ def create_app(test_config=None):
     db.init_app(app)
 
     with app.app_context():
+        migrate_integer_ids(db.engine, app.config.get("MIGRATION_BACKUP_DIR"))
         db.create_all()
         seed_database()
 
@@ -330,7 +512,7 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
             "Reference": txn.reference,
             "Type": c.kind.title(),
             "Group": c.group_name,
-            "Account Code": c.code or "—",
+            "Account Code": c.id,
             "Particular": c.name,
             "Service / Property": c.service_line or c.entity_name or "—",
             "Counterparty": txn.counterparty,
@@ -367,12 +549,12 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
     sections = []
     for kind in ("income", "expense"):
         groups = {}
-        for c in Category.query.filter_by(kind=kind).order_by(Category.group_name, Category.code, Category.name, Category.id).all():
+        for c in Category.query.filter_by(kind=kind).order_by(Category.group_name, Category.id).all():
             if not includes(c) or c.id not in account_totals:
                 continue
             group = groups.setdefault(c.group_name, {"name": c.group_name, "items": [], "totals": dict.fromkeys(columns, 0.0)})
             amounts = account_totals.get(c.id, dict.fromkeys(columns, 0.0))
-            group["items"].append({"code": c.code or "—", "name": c.name, "amounts": amounts})
+            group["items"].append({"code": c.id, "name": c.name, "amounts": amounts})
             for col in columns:
                 group["totals"][col] += amounts[col]
         sections.append({"kind": kind, "label": "Income" if kind == "income" else "Expenditure",
@@ -586,7 +768,7 @@ def register_routes(app):
         vehicles = Vehicle.query.filter_by(active=True).order_by(Vehicle.identifier).all()
         if request.method == "POST":
             try:
-                category = db.session.get(Category, int(request.form.get("category_id", 0)))
+                category = db.session.get(Category, request.form.get("category_id", "").strip())
                 selected_group = request.form.get("group_name", "").strip()
                 if not selected_group:
                     raise ValueError("Select a group.")
@@ -770,8 +952,8 @@ def register_routes(app):
     @app.get("/categories")
     @role_required("admin")
     def categories():
-        items = Category.query.order_by(Category.kind, Category.group_name, Category.code, Category.name).all()
-        groups = Group.query.filter_by(active=True).order_by(Group.kind, Group.name).all()
+        items = Category.query.order_by(Category.kind, Category.id).all()
+        groups = Group.query.filter_by(active=True).order_by(Group.kind, Group.id).all()
         return render_template("categories.html", categories=items, groups=groups)
 
     @app.post("/categories")
@@ -789,19 +971,24 @@ def register_routes(app):
             flash("Select a valid group for the chosen type, or add a new one on the Groups page first.", "error")
         else:
             item = Category(
-                code=request.form.get("code", "").strip() or None, kind=kind,
+                group_id=valid_group.id,
+                kind=kind,
                 group_name=group_name, name=name,
                 service_line=request.form.get("service_line", "").strip() or None,
                 entity_name=request.form.get("entity_name", "").strip() or None,
             )
-            db.session.add(item)
-            db.session.flush()
-            audit("create", "category", item.id, f"{kind}: {name}")
-            db.session.commit()
-            flash("Account particular added.", "success")
+            try:
+                db.session.add(item)
+                db.session.flush()  # the next IP_ id is generated here
+                audit("create", "category", item.id, f"{kind}: {name}")
+                db.session.commit()
+                flash(f"Account particular added with code {item.id}.", "success")
+            except IntegrityError:
+                db.session.rollback()
+                flash("Could not generate a unique ID. Please try again.", "error")
         return redirect(url_for("categories"))
 
-    @app.post("/categories/<int:category_id>/toggle")
+    @app.post("/categories/<category_id>/toggle")
     @role_required("admin")
     def category_toggle(category_id):
         item = db.get_or_404(Category, category_id)
@@ -828,14 +1015,18 @@ def register_routes(app):
             flash("That group already exists for this type.", "error")
         else:
             item = Group(kind=kind, name=name)
-            db.session.add(item)
-            db.session.flush()
-            audit("create", "group", item.id, f"{kind}: {name}")
-            db.session.commit()
-            flash("Group added.", "success")
+            try:
+                db.session.add(item)
+                db.session.flush()  # the next IG_ id is generated here
+                audit("create", "group", item.id, f"{kind}: {name}")
+                db.session.commit()
+                flash(f"Group added with code {item.id}.", "success")
+            except IntegrityError:
+                db.session.rollback()
+                flash("Could not generate a unique ID. Please try again.", "error")
         return redirect(url_for("groups"))
 
-    @app.post("/groups/<int:group_id>/toggle")
+    @app.post("/groups/<group_id>/toggle")
     @role_required("admin")
     def group_toggle(group_id):
         item = db.get_or_404(Group, group_id)
@@ -986,6 +1177,24 @@ def start_backup_worker(app):
     threading.Thread(target=worker, daemon=True, name="sqlite-backup").start()
 
 
+def get_or_create_group(kind, name):
+    group = Group.query.filter_by(kind=kind, name=name).first()
+    if not group:
+        group = Group(kind=kind, name=name)
+        db.session.add(group)
+        db.session.flush()
+    return group
+
+
+def create_category(kind, group_name, name, service=None, entity=None):
+    group = get_or_create_group(kind, group_name)
+    item = Category(group_id=group.id, kind=kind, group_name=group_name, name=name,
+                    service_line=service, entity_name=entity)
+    db.session.add(item)
+    db.session.flush()
+    return item
+
+
 def seed_database():
     if not User.query.first():
         defaults = [
@@ -999,82 +1208,68 @@ def seed_database():
             db.session.add(user)
 
     if not Category.query.first():
-        categories = []
-        def add(code, kind, group, name, service=None, entity=None):
-            categories.append(Category(code=str(code) if code else None, kind=kind, group_name=group, name=name, service_line=service, entity_name=entity))
+        def add(kind, group, name, service=None, entity=None):
+            create_category(kind, group, name, service=service, entity=entity)
 
-        add(351, "income", "Trade Income", "Security Service Income", "Security")
-        add(352, "income", "Trade Income", "Cleaning Service Income", "Cleaning")
-        add(201, "income", "Bank Interest Income", "Bank Interest Received")
-        rentals = [
-            (353, "K.Y.S. Auto Service"), (354, "Pinarawa Housing Complex"), (355, "Welekade Shops"),
-            (355, "Ratwatta Guest House"), (356, "2nd Mile Post Shop Complex"), (356, "Chandrasiri House"),
-            (357, "MD Home Upper Stairs"), (357, "MD Home Shop"), (358, "Haputhale Hotel"),
-            (363, "2nd Mile Post Hostel"), (364, "Galaxy - A Hostel"), (364, "Galaxy - E Hostel"),
-            (365, "Pihillakade Housing Complex"), (366, "Vineethagama House"),
+        add("income", "Trade Income", "Security Service Income", "Security")
+        add("income", "Trade Income", "Cleaning Service Income", "Cleaning")
+        add("income", "Bank Interest Income", "Bank Interest Received")
+        properties = [
+            "K.Y.S. Auto Service", "Pinarawa Housing Complex", "Welekade Shops", "Ratwatta Guest House",
+            "2nd Mile Post Shop Complex", "Chandrasiri House", "MD Home Upper Stairs", "MD Home Shop",
+            "Haputhale Hotel", "2nd Mile Post Hostel", "Galaxy - A Hostel", "Galaxy - E Hostel",
+            "Pihillakade Housing Complex", "Vineethagama House",
         ]
-        for code, entity in rentals:
-            add(code, "income", "Rental Income", f"{entity} Rent Income", entity=entity)
-        add(None, "income", "Construction Projects Income", "Construction Project Receipt")
+        for entity in properties:
+            add("income", "Rental Income", f"{entity} Rent Income", entity=entity)
+        add("income", "Construction Projects Income", "Construction Project Receipt")
 
-        for code, name, service in [
-            (451, "Security Service Salary", "Security"), (452, "Security Service EPF 12%", "Security"),
-            (453, "Security Service ETF 3%", "Security"), (451, "Cleaning Service Salary", "Cleaning"),
-            (452, "Cleaning Service EPF 12%", "Cleaning"), (453, "Cleaning Service ETF 3%", "Cleaning"),
+        for name, service in [
+            ("Security Service Salary", "Security"), ("Security Service EPF 12%", "Security"),
+            ("Security Service ETF 3%", "Security"), ("Cleaning Service Salary", "Cleaning"),
+            ("Cleaning Service EPF 12%", "Cleaning"), ("Cleaning Service ETF 3%", "Cleaning"),
         ]:
-            add(code, "expense", "Direct Trade Expenditure", name, service)
+            add("expense", "Direct Trade Expenditure", name, service)
         operational = [
-            (451, "Staff Salary Expenditure"), (452, "EPF (12%) Expenditure"), (453, "ETF (3%) Expenditure"),
-            (501, "Office Expenditure"), (502, "Printing & Stationery Expenditure"), (503, "Postage & Courier Expenditure"),
-            (504, "Travelling & Subsistence Expenditure"), (505, "Service Operation Expenditure"),
-            (506, "Vehicle Running & Maintenance Expenditure"), (507, "Security Items Expenditure"),
-            (508, "Cleaning Items & Materials Expenditure"), (509, "Training, Permit, Licence & Miscellaneous Expenditure"),
-            (510, "Tender Documents Expenditure"), (513, "Charity & Donation Expenditure"),
-            (514, "Marketing, Promotion, Subscription & Periodicals Expenditure"), (515, "Professional Fees Expenditure"),
-            (516, "Staff Training & Programme Expenditure"), (520, "Cleaning Service Other Expenditure"),
-            (551, "Electricity Charges Expenditure"), (552, "Water Supply Charges Expenditure"),
-            (553, "Telephone & Internet Charges Expenditure"), (609, "MD House Expenditure"),
-            (612, "Kottawa Prime Residence Expenditure"), (652, "Personal Insurance Premium Expenditure"),
-            (653, "Employees Insurance Premium Expenditure"), (654, "Vehicle & General Insurance Premium Expenditure"),
-            (655, "Financial / Loan & OD Interest Expenditure"),
+            "Staff Salary Expenditure", "EPF (12%) Expenditure", "ETF (3%) Expenditure", "Office Expenditure",
+            "Printing & Stationery Expenditure", "Postage & Courier Expenditure",
+            "Travelling & Subsistence Expenditure", "Service Operation Expenditure",
+            "Vehicle Running & Maintenance Expenditure", "Security Items Expenditure",
+            "Cleaning Items & Materials Expenditure", "Training, Permit, Licence & Miscellaneous Expenditure",
+            "Tender Documents Expenditure", "Charity & Donation Expenditure",
+            "Marketing, Promotion, Subscription & Periodicals Expenditure", "Professional Fees Expenditure",
+            "Staff Training & Programme Expenditure", "Cleaning Service Other Expenditure",
+            "Electricity Charges Expenditure", "Water Supply Charges Expenditure",
+            "Telephone & Internet Charges Expenditure", "MD House Expenditure",
+            "Kottawa Prime Residence Expenditure", "Personal Insurance Premium Expenditure",
+            "Employees Insurance Premium Expenditure", "Vehicle & General Insurance Premium Expenditure",
+            "Financial / Loan & OD Interest Expenditure",
         ]
-        for code, name in operational:
-            add(code, "expense", "Operational Expenditure", name)
-        maintenance_codes = {"K.Y.S. Auto Service": 601, "Pinarawa Housing Complex": 602, "Welekade Shops": 603,
-            "Ratwatta Guest House": 603, "2nd Mile Post Shop Complex": 604, "Chandrasiri House": 604,
-            "MD Home Upper Stairs": 605, "MD Home Shop": 605, "Haputhale Hotel": None,
-            "2nd Mile Post Hostel": 613, "Galaxy - A Hostel": 616, "Galaxy - E Hostel": 616,
-            "Pihillakade Housing Complex": None, "Vineethagama House": 611}
-        for entity, code in maintenance_codes.items():
-            add(code, "expense", "Maintenance Expenditure", f"{entity} Maintenance & Expenditure", entity=entity)
-        add(None, "expense", "Construction Projects Expenditure", "Construction Project Payment")
+        for name in operational:
+            add("expense", "Operational Expenditure", name)
+        for entity in properties:
+            add("expense", "Maintenance Expenditure", f"{entity} Maintenance & Expenditure", entity=entity)
+        add("expense", "Construction Projects Expenditure", "Construction Project Payment")
         investments = [
-            (608, "WIP Velaudam Land Building Investment - Phase I"), (620, "WIP Velaudam Land Building Investment - Phase II"),
-            (610, "WIP Damanwara St. Bernard Tea Plantation Investment"), (662, "WIP Damanwara St. Bernard Land Development Investment"),
-            (661, "WIP Galaxy A & E Hostel Building Investment"), (630, "WIP Pihillakade Housing Complex Investment"),
-            (635, "WIP Kandana Pepper Cultivation Investment"),
+            "WIP Velaudam Land Building Investment - Phase I", "WIP Velaudam Land Building Investment - Phase II",
+            "WIP Damanwara St. Bernard Tea Plantation Investment",
+            "WIP Damanwara St. Bernard Land Development Investment",
+            "WIP Galaxy A & E Hostel Building Investment", "WIP Pihillakade Housing Complex Investment",
+            "WIP Kandana Pepper Cultivation Investment",
         ]
-        for code, name in investments:
-            add(code, "expense", "Investment Projects Expenditure", name)
-        db.session.add_all(categories)
+        for name in investments:
+            add("expense", "Investment Projects Expenditure", name)
 
-    if not Group.query.first():
-        seen = set()
-        groups = []
-        for cat in Category.query.order_by(Category.kind, Category.group_name).all():
-            key = (cat.kind, cat.group_name)
-            if key not in seen:
-                seen.add(key)
-                groups.append(Group(kind=cat.kind, name=cat.group_name))
-        db.session.add_all(groups)
+    # Link any particular that predates group IDs to its group.
+    for cat in Category.query.filter(Category.group_id.is_(None)).all():
+        cat.group_id = get_or_create_group(cat.kind, cat.group_name).id
 
     # Apply new tax accounts to both fresh and existing company databases.
     for kind, group_name in (("income", "Inward Taxes"), ("expense", "Tax Expenditure")):
-        if not Group.query.filter_by(kind=kind, name=group_name).first():
-            db.session.add(Group(kind=kind, name=group_name))
+        get_or_create_group(kind, group_name)
         for particular in ("SSCL", "VAT"):
             if not Category.query.filter_by(kind=kind, group_name=group_name, name=particular).first():
-                db.session.add(Category(kind=kind, group_name=group_name, name=particular))
+                create_category(kind, group_name, particular)
 
     if not Vehicle.query.first():
         db.session.add_all([
