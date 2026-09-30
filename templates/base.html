@@ -6,7 +6,7 @@
   <title>{% block title %}K.Y.S. Finance{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='brand.css') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css', v='neutral-20260930') }}">
   <script defer src="{{ url_for('static', filename='app.js') }}"></script>
 </head>
 <body class="{% if not current_user %}auth-body{% endif %}">

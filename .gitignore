@@ -5,6 +5,9 @@ build-package/
 group-report-update/
 kys-finance-group-reports.zip
 KYS-Finance-Company-Server-Windows*.zip
+KYS-Finance-Client*.zip
+client/server.json
+client/*.tmp
 __pycache__/
 .pytest_cache/
 data/

@@ -20,8 +20,13 @@ foreach ($name in @('COMPANY_SETUP.md', 'create-client-shortcut.ps1', 'Create Cl
         'Install KYS Finance Server.ps1', 'Install KYS Finance Server.cmd',
         'Enable Auto Start.ps1', 'Enable Auto Start.cmd',
         'Configure External Backup.ps1', 'Configure External Backup.cmd',
-        'Open KYS Finance on Server.url')) {
+        'Open KYS Finance on Server.url', 'Enable Network Access.ps1', 'Enable Network Access.cmd')) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $name) `
     -Destination (Join-Path $projectRoot 'release\KYS Finance Server') -Force
+}
+$clientDestination = Join-Path $projectRoot 'release\KYS Finance Server\client'
+New-Item -ItemType Directory -Path $clientDestination -Force | Out-Null
+foreach ($name in @('KYS Client.ps1', 'Install KYS Finance Client.ps1', 'Install KYS Finance Client.cmd', 'README.txt')) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "client\$name") -Destination $clientDestination -Force
 }
 Write-Host "Ready: $(Join-Path $projectRoot 'release\KYS Finance Server\KYS Finance Server.exe')"

@@ -521,7 +521,7 @@ def register_context(app):
 def register_routes(app):
     @app.get("/health")
     def health():
-        return {"status": "ok", "database": "connected"}
+        return {"status": "ok", "database": "connected", "service": "kys-finance"}
 
     @app.route("/login", methods=["GET", "POST"])
     def login():

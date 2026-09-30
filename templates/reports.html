@@ -2,7 +2,7 @@
 {% block title %}P&L reports · K.Y.S. Finance{% endblock %}
 {% block page_title %}P&amp;L reports{% endblock %}
 {% block content %}
-<link rel="stylesheet" href="{{ url_for('static', filename='reports.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='reports.css', v='neutral-20260930') }}">
 <section class="hero-row compact">
   <div><span class="eyebrow">Cash basis only</span><h1>Profit &amp; loss reporting</h1><p>Only actual money received and actually paid in the selected period is included.</p></div>
   <a class="btn excel" href="{{ url_for('reports_export', type=report_type, start=start, end=end, group=selected_groups) }}">↓ Export Excel</a>

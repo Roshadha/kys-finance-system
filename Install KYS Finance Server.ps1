@@ -28,7 +28,8 @@ if ($sourcePath -ine $installPath) {
             'Open KYS Finance on Server.url', 'Install KYS Finance Server.ps1',
             'Install KYS Finance Server.cmd', 'Enable Auto Start.ps1',
             'Enable Auto Start.cmd', 'Configure External Backup.ps1',
-            'Configure External Backup.cmd')) {
+            'Configure External Backup.cmd', 'Enable Network Access.ps1',
+            'Enable Network Access.cmd', 'client')) {
         $item = Join-Path $sourcePath $name
         if (Test-Path -LiteralPath $item) {
             Copy-Item -LiteralPath $item -Destination $installPath -Recurse -ErrorAction Stop
@@ -57,3 +58,5 @@ if (-not $SkipStartupRegistration) {
     & (Join-Path $installPath 'Enable Auto Start.ps1') -InstallDirectory $installPath
 }
 Write-Host 'Start the server shortcut now. After future restarts, the app will start when this Windows user signs in.'
+Write-Host 'For client auto-discovery, run Enable Network Access.cmd from the installed folder once.'
+Write-Host 'Copy the client folder to each staff PC and run Install KYS Finance Client.cmd there.'
