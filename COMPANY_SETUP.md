@@ -1,5 +1,17 @@
 # K.Y.S. Finance — company setup
 
+## Automatic setup (October 2026)
+
+Extract the entire ZIP and double-click **Install KYS Finance Server.cmd** using the Windows account that will run the server. Approve the administrator prompt for firewall setup. Setup now creates desktop shortcuts, registers automatic startup, enables Private-LAN TCP 5000 / UDP 5057 firewall rules, starts the server hidden, checks its health and opens the browser. No separate first-start or network-helper step is needed. If setup reports an error, setup has not fully completed; correct it and rerun from the installed folder.
+
+If the extracted folder already has `data\kys_finance.db`, setup configures **that same folder in place**. It does not copy, overwrite or delete that database. Keep that folder permanently (including `_internal`, `data`, and `backups`); shortcuts and startup point there. With a clean package, setup copies to `Documents\KYS Finance Server`. An unrelated existing destination is still protected against overwrite. This is setup automation for the ZIP package, not a new standalone MSI/Setup.exe.
+
+**Startup means Windows sign-in, not power-on before sign-in.** Sign in with the installing Windows account after reboot and leave it signed in (locking the screen is fine). A company requiring operation before sign-in needs a separate Windows-service deployment. The server runs hidden; closing the browser does not stop it. `server-startup.log` and `server-error.log` are in the installed folder. The desktop Start shortcut checks for an existing instance rather than launching another copy.
+
+Local backups are automatic while the server runs. An off-PC backup cannot be configured without choosing a destination: run **Configure External Backup.cmd** once with your external drive / approved NAS folder. Only mark the trusted company network Private; setup does not change network profiles or open access on Public networks.
+
+The older manual steps below remain useful for repair. For disaster recovery, **restore the database and secret into the extracted package before running setup**, because setup now starts the app automatically. Alternatively, an IT administrator can run `Install KYS Finance Server.ps1 -SkipLaunch` to configure without starting the app.
+
 ## One server PC
 
 1. Extract the release ZIP, open the **KYS Finance Server** folder, and double-click **Install KYS Finance Server.cmd**. It copies the whole application to your `Documents\KYS Finance Server` folder and creates two desktop shortcuts. Keep the EXE together with its `_internal` folder; do not place it in `Program Files`.

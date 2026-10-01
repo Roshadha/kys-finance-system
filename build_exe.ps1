@@ -18,7 +18,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Install the packaging dependency: .venv\Script
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
 foreach ($name in @('COMPANY_SETUP.md', 'create-client-shortcut.ps1', 'Create Client Shortcut.cmd',
         'Install KYS Finance Server.ps1', 'Install KYS Finance Server.cmd',
-        'Enable Auto Start.ps1', 'Enable Auto Start.cmd',
+        'Enable Auto Start.ps1', 'Enable Auto Start.cmd', 'Start KYS Finance.ps1',
         'Configure External Backup.ps1', 'Configure External Backup.cmd',
         'Open KYS Finance on Server.url', 'Enable Network Access.ps1', 'Enable Network Access.cmd')) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $name) `

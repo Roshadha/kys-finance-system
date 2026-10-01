@@ -10,10 +10,14 @@ $userName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 try {
     Import-Module ScheduledTasks -ErrorAction Stop
     $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($existing -and $existing.Actions.Execute -ine $exe) {
+    $launcher = Join-Path $installPath 'Start KYS Finance.ps1'
+    $powershell = Join-Path $PSHOME 'powershell.exe'
+    $launchArguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '" -WaitForExit'
+    if ($existing -and -not (($existing.Actions.Execute -ieq $exe) -or
+            ($existing.Actions.Execute -ieq $powershell -and $existing.Actions.Arguments -ceq $launchArguments))) {
         throw "A different task already uses the name $taskName. Ask IT to inspect Task Scheduler."
     }
-    $action = New-ScheduledTaskAction -Execute $exe -WorkingDirectory $installPath
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument $launchArguments -WorkingDirectory $installPath
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userName
     $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
@@ -29,7 +33,9 @@ try {
     $startup = [Environment]::GetFolderPath('Startup')
     if (-not (Test-Path -LiteralPath $startup -PathType Container)) { throw }
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $startup 'KYS Finance Server.lnk'))
-    $shortcut.TargetPath = $exe
+    $shortcut.TargetPath = Join-Path $PSHOME 'powershell.exe'
+    $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $installPath 'Start KYS Finance.ps1') + '"'
+    $shortcut.WindowStyle = 7
     $shortcut.WorkingDirectory = $installPath
     $shortcut.Save()
     Write-Warning "Task Scheduler was unavailable ($($_.Exception.Message)). A Windows Startup shortcut was created instead."
