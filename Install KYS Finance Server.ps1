@@ -28,7 +28,7 @@ if ($sourcePath -ine $installPath) {
         throw "Installation folder already exists: $installPath. To protect existing data, this setup will not overwrite it. Read COMPANY_SETUP.md for update steps."
     }
     New-Item -ItemType Directory -Path $installPath -ErrorAction Stop | Out-Null
-    foreach ($name in @('KYS Finance Server.exe', '_internal', 'COMPANY_SETUP.md',
+    foreach ($name in @('KYS Finance Server.exe', '_internal', 'COMPANY_SETUP.md', 'WINDOWS10_SETUP.md',
             'create-client-shortcut.ps1', 'Create Client Shortcut.cmd',
             'Open KYS Finance on Server.url', 'Install KYS Finance Server.ps1',
             'Install KYS Finance Server.cmd', 'Enable Auto Start.ps1',
@@ -62,25 +62,24 @@ Set-Content -LiteralPath (Join-Path $ShortcutDirectory 'Open KYS Finance.url') -
 Write-Host "Installed in: $installPath"
 Write-Host 'Desktop shortcuts created: Start KYS Finance Server, Open KYS Finance'
 if (-not $SkipStartupRegistration) {
-    & (Join-Path $installPath 'Enable Auto Start.ps1') -InstallDirectory $installPath
+    $startupRegistration = & (Join-Path $installPath 'Enable Auto Start.ps1') -InstallDirectory $installPath
 }
 & (Join-Path $installPath 'Enable Network Access.ps1')
 if (-not $SkipLaunch) {
-    $startupTask = Get-ScheduledTask -TaskName 'KYS Finance Server Auto Start' -ErrorAction SilentlyContinue
-    if (-not $SkipStartupRegistration -and $startupTask) {
-        Start-ScheduledTask -TaskName 'KYS Finance Server Auto Start'
+    if (-not $SkipStartupRegistration -and $startupRegistration.Mode -eq 'Task') {
+        Start-ScheduledTask -TaskName $startupRegistration.TaskName
     } else {
         & (Join-Path $installPath 'Start KYS Finance.ps1')
     }
     $ready = $false
-    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
         try {
             $health = Invoke-RestMethod 'http://127.0.0.1:5000/health' -TimeoutSec 2
             if ($health.service -eq 'kys-finance' -and $health.status -eq 'ok') { $ready = $true; break }
         } catch { }
         Start-Sleep -Seconds 1
     }
-    if (-not $ready) { throw 'Settings saved, but server health check failed. Check server-startup.log in the installed folder.' }
+    if (-not $ready) { throw 'Settings saved, but server health check failed. Check launcher-error.log, server-error.log and server-startup.log in the installed folder.' }
     Start-Process 'http://127.0.0.1:5000/'
 }
 Write-Host 'Setup complete: shortcuts, automatic sign-in startup and Private LAN firewall rules are enabled.'

@@ -2,10 +2,10 @@
 $ErrorActionPreference = 'Stop'
 $launcherTestState = @{ Scenario = 'fresh'; Launched = 0; Exe = (Join-Path (Split-Path $PSScriptRoot -Parent) 'KYS Finance Server.exe') }
 function Test-Path { param($LiteralPath, $PathType) return $true }
-function Get-CimInstance {
-    param($ClassName, $Filter)
+function Get-Process {
+    param($Name, $ErrorAction)
     if ($launcherTestState.Scenario -eq 'running') {
-        [pscustomobject]@{ ExecutablePath = $launcherTestState.Exe }
+        [pscustomobject]@{ Path = $launcherTestState.Exe }
     }
 }
 function Get-NetTCPConnection {
@@ -18,6 +18,7 @@ function Start-Process {
     $launcherTestState.Launched++
     [pscustomobject]@{ Id = 12345 }
 }
+function Add-Content { param($LiteralPath, $Value) }
 $launcher = Join-Path (Split-Path $PSScriptRoot -Parent) 'Start KYS Finance.ps1'
 & $launcher
 if ($launcherTestState.Launched -ne 1) { throw 'Fresh launch failed.' }

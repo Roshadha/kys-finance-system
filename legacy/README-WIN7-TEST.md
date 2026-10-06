@@ -1,0 +1,17 @@
+# Windows 7 SP1 legacy TEST candidate — not production-certified
+
+This x86 build is intended for both 32-bit and 64-bit Windows 7 SP1. It uses Python 3.8.10 and older compatible dependencies. Windows 7 and Python 3.8 are out of support. Do NOT use confidential company data or expose this test server to the internet. It listens on localhost only; no LAN firewall rules are installed.
+
+No Windows 7 VM was available to the developer. Python 3.8 application tests and executable checks on the development Windows host are NOT Windows 7 certification. The original DLL error cannot be declared fixed on your machine until this candidate actually starts there. Windows runtime updates (Universal CRT / supported VC runtime and Python's Windows 7 prerequisites) may still be needed. Do not obtain individual DLLs from random websites.
+
+## Test on the actual Windows 7 PC
+
+1. Back up any existing company data. Stop the old server. Extract this ZIP into a NEW, permanent, user-writable folder. Do not copy an existing database into it.
+2. Run `Install Legacy Test.cmd` normally as the Windows user who will run it. It creates desktop and current-user Startup shortcuts in place. It does not upgrade another installation. Keep this folder in place.
+3. Run `Check Legacy Server.cmd`. Send `compatibility-test.txt` and any error screenshot back to the developer. If it fails, also send `server-error.log` / `launcher-error.log`, not your database or secrets.
+4. Sign in with the initial test account `admin` / `Admin@2026`, change the password, create disposable test income/expenditure, generate a report and export Excel. Verify totals. Do not use real company data.
+5. Restart Windows, sign in as the same user and run ONLY `Check Legacy Server.cmd` (not Install/Start). Confirm the health check passes and disposable entries remain. This tests actual sign-in startup/persistence. It does not start before Windows sign-in.
+
+Keep this PC awake while testing. The Startup-folder fallback has no crash-restart service. LAN deployment, external backup configuration and real-data migration need separate validation after these tests pass.
+
+To disable test startup, remove only `KYS Finance Legacy TEST.lnk` from the current user's Startup folder (`Win+R`, `shell:startup`). Close the corresponding test server process before removing its extracted folder. Do not remove any production database.

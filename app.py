@@ -8,13 +8,13 @@ import sqlite3
 import sys
 import threading
 import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from contextlib import closing
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
 
-import pandas as pd
+from openpyxl import Workbook
 from flask import (
     Flask,
     abort,
@@ -57,7 +57,7 @@ SUBTOTAL_ONLY_GROUPS = {
 
 
 def utc_now():
-    return datetime.now(UTC).replace(tzinfo=None)
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class User(db.Model):
@@ -582,7 +582,16 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
         "Particular": "TOTAL", "Income": data["income"],
         "Expenditure": data["expense"], "Liquid P/L": data["pl"],
     })
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with closing(Workbook()) as workbook:
+        workbook.remove(workbook.active)
+        def write_rows(name, rows):
+            sheet = workbook.create_sheet(name)
+            headers = list(dict.fromkeys(key for row in rows for key in row))
+            for col, header in enumerate(headers, 1):
+                sheet.cell(5, col, header)
+            for row_index, row in enumerate(rows, 6):
+                for col, header in enumerate(headers, 1):
+                    sheet.cell(row_index, col, row.get(header))
         grouped_rows = []
         styled_rows = []
         def statement_row(label, amounts=None, code="", bold=False, number=""):
@@ -609,11 +618,11 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
                     statement_row(group["name"] + " — Total", group["totals"], bold=True)
             statement_row("Total " + section["label"], section["totals"], bold=True)
         statement_row("Liquid P/L", {col: data["pl"] if col == "Cash Total" else None for col in data["columns"]}, bold=True)
-        pd.DataFrame(grouped_rows).to_excel(writer, sheet_name="Group Report", index=False, startrow=4)
-        pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Summary", index=False, startrow=4)
+        write_rows("Group Report", grouped_rows)
+        write_rows("Summary", summary_rows)
         if report_type != "short":
-            pd.DataFrame([{k: v for k, v in row.items() if k != "Category ID"} for row in data["rows"]]).to_excel(writer, sheet_name="Detailed Ledger", index=False, startrow=4)
-        for ws in writer.book.worksheets:
+            write_rows("Detailed Ledger", [{k: v for k, v in row.items() if k != "Category ID"} for row in data["rows"]])
+        for ws in workbook.worksheets:
             ws["A1"] = "K.Y.S. Cash-Based P&L Management System"
             ws["A2"] = title_map.get(report_type, title_map["monthly"])
             ws["A3"] = f"Cash period: {start:%d %b %Y} to {end:%d %b %Y}"
@@ -641,7 +650,7 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
                         cell.number_format = '#,##0.00;[Red]-#,##0.00'
                     elif cell.data_type == "f":
                         cell.data_type = "s"
-        ws = writer.book["Group Report"]
+        ws = workbook["Group Report"]
         ws.auto_filter.ref = None
         ws.column_dimensions["A"].width = 14
         ws.column_dimensions["B"].width = 58
@@ -674,6 +683,7 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
             ws.column_dimensions["B"].width = 22
             ws.print_area = f"A1:B{ws.max_row}"
         ws.print_options.horizontalCentered = True
+        workbook.save(output)
     output.seek(0)
     return output
 
@@ -1103,7 +1113,7 @@ def make_backup(app, force_external=False):
     database_uri = app.config["SQLALCHEMY_DATABASE_URI"]
     if not database_uri.startswith("sqlite:///"):
         raise RuntimeError("Automatic file backup is only available for SQLite.")
-    source = Path(database_uri.removeprefix("sqlite:///"))
+    source = Path(database_uri[len("sqlite:///"):])
     if not source.is_absolute():
         source = DATA_ROOT / source
     destination = DATA_ROOT / "backups" / f"kys_finance_{datetime.now():%Y%m%d_%H%M%S_%f}.db"

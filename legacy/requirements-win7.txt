@@ -1,0 +1,9 @@
+# Isolated legacy TEST build only. Do not replace the modern requirements.
+Flask==3.0.3
+Werkzeug==3.0.6
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy==2.0.36
+openpyxl==3.1.5
+cheroot==10.0.1
+PyInstaller==6.10.0
+pyinstaller-hooks-contrib==2024.8

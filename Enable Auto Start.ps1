@@ -19,15 +19,19 @@ try {
     }
     $action = New-ScheduledTaskAction -Execute $powershell -Argument $launchArguments -WorkingDirectory $installPath
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userName
+    # Allow slow disks and Windows sign-in services time to settle.
+    $trigger.Delay = 'PT30S'
     $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType Interactive -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+    $settings = New-ScheduledTaskSettingsSet -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew `
         -StartWhenAvailable -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
         -Principal $principal -Settings $settings -Description 'Start KYS Finance when this Windows user signs in' `
         -Force -ErrorAction Stop | Out-Null
+    Enable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
     Write-Host "Auto-start enabled for $userName via Windows Task Scheduler."
     Write-Host 'It starts when this user signs in after a reboot, not before Windows sign-in.'
+    [pscustomobject]@{ Mode = 'Task'; TaskName = $taskName }
 } catch {
     if ($_.Exception.Message -like 'A different task already uses*') { throw }
     $startup = [Environment]::GetFolderPath('Startup')
@@ -40,4 +44,5 @@ try {
     $shortcut.Save()
     Write-Warning "Task Scheduler was unavailable ($($_.Exception.Message)). A Windows Startup shortcut was created instead."
     Write-Host 'It starts when this user signs in after a reboot; it does not automatically restart after a crash.'
+    [pscustomobject]@{ Mode = 'Startup'; TaskName = $null }
 }
