@@ -3,8 +3,21 @@ param(
     [switch]$FunctionsOnly
 )
 $ErrorActionPreference = 'Stop'
-$script:ClientDirectory = $PSScriptRoot
+$script:ClientDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:ConfigPath = Join-Path $script:ClientDirectory 'server.json'
+
+function Read-KysJson([string]$Text) {
+    if ($PSVersionTable.PSVersion.Major -ge 3) { return ($Text | ConvertFrom-Json) }
+    Add-Type -AssemblyName System.Web.Extensions
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    return $serializer.DeserializeObject($Text)
+}
+function Write-KysJson($Value) {
+    if ($PSVersionTable.PSVersion.Major -ge 3) { return ($Value | ConvertTo-Json -Compress) }
+    Add-Type -AssemblyName System.Web.Extensions
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    return $serializer.Serialize($Value)
+}
 
 function New-KysShortcut([string]$ShortcutDirectory = [Environment]::GetFolderPath('Desktop')) {
     $link = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $ShortcutDirectory 'KYS Finance.lnk'))
@@ -26,7 +39,7 @@ function Test-KysServer([string]$Address, [int]$Port) {
         $request.AllowAutoRedirect = $false
         $response = $request.GetResponse()
         $reader = New-Object IO.StreamReader($response.GetResponseStream())
-        try { $health = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+        try { $health = Read-KysJson $reader.ReadToEnd() } finally { $reader.Dispose() }
         return ($health.service -eq 'kys-finance' -and $health.status -eq 'ok')
     } catch { return $false } finally { if ($response) { $response.Close() } }
 }
@@ -53,7 +66,7 @@ function Find-KysServers([int]$DiscoveryPort = 5057) {
         $udp.EnableBroadcast = $true
         $udp.Client.ReceiveTimeout = 400
         $nonce = [Guid]::NewGuid().ToString('N')
-        $packet = [Text.Encoding]::UTF8.GetBytes((@{service='kys-finance'; version=1; nonce=$nonce} | ConvertTo-Json -Compress))
+        $packet = [Text.Encoding]::UTF8.GetBytes((Write-KysJson @{service='kys-finance'; version=1; nonce=$nonce}))
         foreach ($address in Get-KysBroadcasts) {
             try { [void]$udp.Send($packet, $packet.Length, $address, $DiscoveryPort) } catch { }
         }
@@ -63,7 +76,7 @@ function Find-KysServers([int]$DiscoveryPort = 5057) {
                 $peer = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0)
                 $data = $udp.Receive([ref]$peer)
                 if ($data.Length -gt 2048) { continue }
-                $reply = [Text.Encoding]::UTF8.GetString($data) | ConvertFrom-Json
+                $reply = Read-KysJson ([Text.Encoding]::UTF8.GetString($data))
                 if ($reply.service -ne 'kys-finance' -or $reply.version -ne 1 -or $reply.nonce -cne $nonce) { continue }
                 $port = 0
                 if (-not [int]::TryParse([string]$reply.port, [ref]$port) -or $port -lt 1 -or $port -gt 65535) { continue }
@@ -71,7 +84,7 @@ function Find-KysServers([int]$DiscoveryPort = 5057) {
                 $name = [string]$reply.name -replace '[^A-Za-z0-9_.-]', ''
                 $name = $name.Substring(0, [Math]::Min(63, $name.Length))
                 if (-not $name -or $found.Count -ge 16) { continue }
-                $found["${address}:$port"] = [pscustomobject]@{address=$address; port=$port; name=$name; manual=$false}
+                $found["${address}:$port"] = @{address=$address; port=$port; name=$name; manual=$false}
             } catch [Net.Sockets.SocketException] { } catch [ArgumentException] { } catch { }
         }
     } finally { $udp.Close() }
@@ -81,13 +94,13 @@ function Find-KysServers([int]$DiscoveryPort = 5057) {
 }
 
 function Get-KysSavedServer {
-    try { return Get-Content -LiteralPath $script:ConfigPath -Raw | ConvertFrom-Json } catch { return $null }
+    try { return Read-KysJson ([IO.File]::ReadAllText($script:ConfigPath)) } catch { return $null }
 }
 
 function Save-KysServer($Server) {
     $temporary = Join-Path $script:ClientDirectory ([Guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        $Server | ConvertTo-Json | Set-Content -LiteralPath $temporary -Encoding UTF8
+        Write-KysJson $Server | Set-Content -LiteralPath $temporary -Encoding UTF8
         Move-Item -LiteralPath $temporary -Destination $script:ConfigPath -Force
     } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary } }
 }
@@ -109,7 +122,7 @@ if ($Mode -eq 'Monitor') {
     # One watcher per signed-in user; no browser is opened automatically.
     $mutex = New-Object Threading.Mutex($false, 'Local\KYSFinanceClientDiscovery')
     try { $acquired = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired = $true }
-    if (-not $acquired) { $mutex.Dispose(); exit }
+    if (-not $acquired) { $mutex.Close(); exit }
     try {
         while ($true) {
             try {
@@ -120,7 +133,7 @@ if ($Mode -eq 'Monitor') {
             } catch { }
             Start-Sleep -Seconds 30
         }
-    } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
+    } finally { $mutex.ReleaseMutex(); $mutex.Close() }
     exit
 }
 
@@ -152,7 +165,7 @@ try {
             $port = 5000
             if ($portText -and -not [int]::TryParse($portText, [ref]$port)) { continue }
             if (Test-KysServer $address $port) {
-                $server = [pscustomobject]@{address=$address; port=$port; name=$address; manual=$true}
+                $server = @{address=$address; port=$port; name=$address; manual=$true}
             } else { Write-Host 'Cannot reach a compatible KYS Finance server at that address.' }
             continue
         }

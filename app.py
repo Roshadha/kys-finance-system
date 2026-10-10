@@ -1206,7 +1206,7 @@ def create_category(kind, group_name, name, service=None, entity=None):
 
 
 def seed_database():
-    if not User.query.first():
+    if not User.query.first() and os.environ.get("KYS_COMPANY_MODE") != "1":
         defaults = [
             ("admin", "System Administrator", "Accounts", "admin", [*TASKS], "Admin@2026"),
             ("management", "Management", "Management", "management", ["view_reports"], "Manage@2026"),

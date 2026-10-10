@@ -2,7 +2,16 @@
 
 This x86 build is intended for both 32-bit and 64-bit Windows 7 SP1. It uses Python 3.8.10 and older compatible dependencies. Windows 7 and Python 3.8 are out of support. Do NOT use confidential company data or expose this test server to the internet. It listens on localhost only; no LAN firewall rules are installed.
 
-No Windows 7 VM was available to the developer. Python 3.8 application tests and executable checks on the development Windows host are NOT Windows 7 certification. The original DLL error cannot be declared fixed on your machine until this candidate actually starts there. Windows runtime updates (Universal CRT / supported VC runtime and Python's Windows 7 prerequisites) may still be needed. Do not obtain individual DLLs from random websites.
+The revised launcher and executable were tested on a Windows 7 SP1 x64 VirtualBox VM on 2026-10-10. Startup after restart, health, login, disposable income/expenditure, report totals and Excel download passed. This is not certification of a 32-bit Windows installation or a company deployment. See TEST-RESULTS.md. Older published ZIPs may not contain these launcher fixes.
+
+## Required Windows updates
+
+On the tested clean Windows 7 SP1 VM, install Microsoft's Universal C Runtime update KB2999226 and DLL-loading update KB3063858, then restart Windows. Without them, Python can fail to load python38.dll or _socket before the application starts. Choose updates for the Windows OS architecture (not the x86 app architecture).
+
+- x64 KB2999226: https://www.microsoft.com/en-us/download/details.aspx?id=49093
+- x64 KB3063858: https://www.microsoft.com/en-us/download/details.aspx?id=47442
+
+These links are for x64 Windows only. Do not obtain individual DLLs from random websites. Installing these prerequisites does not restore security support for Windows 7.
 
 ## Test on the actual Windows 7 PC
 

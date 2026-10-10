@@ -14,7 +14,14 @@ try {
         if ($listeners.Count) { throw 'Port 5000 is used by another app/server. Do not run two copies.' }
         $env:KYS_HOST = '127.0.0.1'
         $env:PORT = '5000'
-        Start-Process -FilePath $exe -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $root 'server-startup.log') -RedirectStandardError (Join-Path $root 'server-error.log') | Out-Null
+        # PowerShell 2.0 cannot combine WindowStyle with output redirection.
+        # Start independently without a console; the Python entry point logs.
+        $info = New-Object Diagnostics.ProcessStartInfo
+        $info.FileName = $exe
+        $info.WorkingDirectory = $root
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        [Diagnostics.Process]::Start($info) | Out-Null
     }
 } catch {
     Add-Content -LiteralPath (Join-Path $root 'launcher-error.log') -Value ((Get-Date -Format o) + ' ' + $_.Exception.Message)

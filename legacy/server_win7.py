@@ -1,5 +1,12 @@
 """Windows 7 legacy test entry point; does not alter the modern Waitress server."""
 import os
+import sys
+from pathlib import Path
+
+if getattr(sys, 'frozen', False):
+    log_root = Path(sys.executable).resolve().parent
+    sys.stdout = open(str(log_root / 'server-startup.log'), 'a', buffering=1, encoding='utf-8')
+    sys.stderr = open(str(log_root / 'server-error.log'), 'a', buffering=1, encoding='utf-8')
 from cheroot.wsgi import Server
 from app import app
 from discovery import start_discovery

@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$source = Join-Path $PSScriptRoot 'KYS Client.ps1'
+$source = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'KYS Client.ps1'
 $installDirectory = Join-Path $env:LOCALAPPDATA 'KYS Finance Client'
 New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
 $launcher = Join-Path $installDirectory 'KYS Client.ps1'
