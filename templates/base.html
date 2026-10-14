@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='brand.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='theme.css', v='neutral-20260930') }}">
   <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  {% if live_revision is not none and current_user %}<script defer src="{{ url_for('static', filename='live-updates.js', v='1') }}"></script>{% endif %}
 </head>
 <body class="{% if not current_user %}auth-body{% endif %}">
 {% if current_user %}
@@ -40,6 +41,7 @@
       </div>
     </header>
     <main class="content">
+      {% if live_revision is not none %}<div id="liveUpdates" data-version="{{ live_revision }}" data-url="{{ url_for('updates_version') }}" role="status" aria-live="polite"><small id="liveUpdateStatus">Auto-update on · checks every 5 seconds</small> <button type="button" class="link-button" id="liveUpdateNow" hidden>Show latest data</button></div>{% endif %}
 {% endif %}
       {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}<div class="flash-stack">{% for category, message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}</div>{% endif %}

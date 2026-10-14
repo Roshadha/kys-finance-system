@@ -17,6 +17,8 @@ Copy the client folder to each PC and run Install KYS Finance Client.cmd once. I
 
 ## Data and safety
 
+Overview, Cash ledger and Reports check for saved changes every five seconds while the tab is visible. New entries, edits, deletions and account/group changes refresh the current view with its applied month and filters. Unsaved filter selections and open delete confirmations defer refresh; use Show latest data to discard a pending selection and reload. Entry/edit forms do not auto-refresh. Network interruptions retry automatically. This display update is separate from database backups.
+
 ### Easy restore on the server computer
 
 After completing installation, double-click **Restore KYS Backup** on the server desktop (or run **Restore KYS Backup.cmd** in the installed folder). Enter the current installation administrator username/password, choose the old `.db` file, review its transaction count and latest transaction date, and confirm. Restore replaces data and users; it does not merge two databases. The file must be from a compatible KYS database version and contain an active administrator.

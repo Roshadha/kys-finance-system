@@ -35,6 +35,47 @@ class FinanceAppTests(unittest.TestCase):
         self.assertEqual(self.client.get("/reports").status_code, 200)
         self.assertEqual(self.client.get("/users").status_code, 403)
 
+    def test_live_updates_across_users_and_entry_changes(self):
+        self.assertEqual(self.client.get('/updates/version').status_code, 401)
+        self.login()
+        reader = self.app.test_client()
+        reader.get('/login')
+        with reader.session_transaction() as state:
+            token = state['csrf_token']
+        reader.post('/login', data={'csrf_token': token, 'username': 'management', 'password': 'Manage@2026'})
+        before = reader.get('/updates/version')
+        self.assertEqual(before.headers['Cache-Control'], 'no-store')
+        version = before.json['version']
+        self.client.get('/reports/export')
+        self.assertEqual(reader.get('/updates/version').json['version'], version)
+        with self.app.app_context():
+            category = Category.query.filter_by(name='Security Service Income').one()
+            category_id, group_name = category.id, category.group_name
+        result = self.client.post('/transactions/new?kind=income', data={
+            'csrf_token': self.csrf(), 'category_id': category_id, 'group_name': group_name,
+            'month_number': '10', 'year': '2026', 'subtotal': '125', 'reference': 'LIVE-TEST'})
+        self.assertEqual(result.status_code, 302)
+        changed = reader.get('/updates/version').json['version']
+        self.assertNotEqual(changed, version)
+        for path in ['/?month=2026-10', '/transactions?year=2026&month_number=10', '/reports?year=2026&month_number=10']:
+            page = reader.get(path)
+            self.assertIn(b'id="liveUpdates"', page.data)
+            self.assertIn(changed.encode(), page.data)
+            self.assertIn(b'125.00', page.data)
+        self.assertNotIn(b'id="liveUpdates"', self.client.get('/transactions/new?kind=income').data)
+        with self.app.app_context():
+            transaction_id = Transaction.query.filter_by(reference='LIVE-TEST').one().id
+        self.client.post(f'/transactions/{transaction_id}/edit', data={
+            'csrf_token': self.csrf(), 'version': '0', 'total': '150', 'reason': 'Live edit'})
+        edited = reader.get('/updates/version').json['version']
+        self.assertNotEqual(edited, changed)
+        self.client.post(f'/transactions/{transaction_id}/delete', data={'csrf_token': self.csrf(), 'confirmed': 'yes'})
+        self.assertNotEqual(reader.get('/updates/version').json['version'], edited)
+        with self.app.app_context():
+            User.query.filter_by(username='management').one().active = False
+            db.session.commit()
+        self.assertEqual(reader.get('/updates/version').status_code, 401)
+
     def test_dashboard_month_links_follow_calendar_boundaries(self):
         class MarchFirst(date):
             @classmethod

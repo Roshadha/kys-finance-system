@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import secrets
 import shutil
@@ -20,6 +21,7 @@ from flask import (
     Flask,
     abort,
     flash,
+    g,
     redirect,
     render_template,
     request,
@@ -809,6 +811,7 @@ def register_context(app):
             "current_user": current_user(), "TASKS": TASKS, "ROLES": ROLES,
             "today": date.today(), "csrf_token": session.get("csrf_token", ""),
             "entry_period": remembered_entry_period(),
+            "live_revision": getattr(g, "live_revision", None),
             "group_codes": gc,
             "group_labels": {g.id: format_id(GROUP_PREFIX[g.kind], gc[g.id], 4) for g in Group.query.all()},
             "particular_labels": {c.id: format_id(CATEGORY_PREFIX[c.kind], pc[c.id], 4) for c in Category.query.all()},
@@ -820,6 +823,8 @@ def register_context(app):
 
     @app.before_request
     def csrf_and_session():
+        if request.endpoint in {"dashboard", "transactions", "reports"}:
+            g.live_revision = data_revision()
         if "csrf_token" not in session:
             session["csrf_token"] = secrets.token_urlsafe(24)
         if request.method == "POST":
@@ -828,7 +833,22 @@ def register_context(app):
                 abort(400, "Invalid or expired form token. Refresh the page and try again.")
 
 
+def data_revision():
+    latest = AuditLog.query.filter(AuditLog.action.notin_(
+        ['login', 'logout', 'export', 'backup', 'entry_period']
+    )).order_by(AuditLog.id.desc()).first()
+    value = f'{latest.id}:{latest.happened_at}' if latest else 'empty'
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 def register_routes(app):
+    @app.get('/updates/version')
+    def updates_version():
+        user = current_user()
+        if not user or not user.active:
+            return {'error': 'Sign in required'}, 401, {'Cache-Control': 'no-store'}
+        return {'version': data_revision()}, 200, {'Cache-Control': 'no-store'}
+
     @app.get("/health")
     def health():
         return {"status": "ok", "database": "connected", "service": "kys-finance"}
