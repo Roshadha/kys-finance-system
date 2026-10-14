@@ -15,14 +15,13 @@
     <div class="brand"><span class="brand-mark kys-logo" role="img" aria-label="K.Y.S. logo"></span><span><strong>K.Y.S.</strong><small>Cash P&amp;L</small></span></div>
     <nav>
       <a class="{{ 'active' if request.endpoint == 'dashboard' }}" href="{{ url_for('dashboard') }}"><span>⌂</span>Overview</a>
-      <a class="{{ 'active' if request.endpoint in ['transactions','transaction_new','adjustment_new'] }}" href="{{ url_for('transactions') }}"><span>↔</span>Cash ledger</a>
+      <a class="{{ 'active' if request.endpoint in ['transactions','transaction_new','transaction_edit','adjustment_new'] }}" href="{{ url_for('transactions') }}"><span>↔</span>Cash ledger</a>
       {% if current_user.can('view_reports') %}<a class="{{ 'active' if request.endpoint in ['reports','reports_export'] }}" href="{{ url_for('reports') }}"><span>▥</span>Reports</a>{% endif %}
       {% if current_user.role == 'admin' %}
         <span class="nav-label">Administration</span>
         <a class="{{ 'active' if request.endpoint in ['users','user_new','user_edit'] }}" href="{{ url_for('users') }}"><span>♙</span>Users &amp; access</a>
         <a class="{{ 'active' if request.endpoint in ['categories','category_new','category_toggle'] }}" href="{{ url_for('categories') }}"><span>≡</span>Chart of accounts</a>
         <a class="{{ 'active' if request.endpoint in ['groups','group_new','group_toggle'] }}" href="{{ url_for('groups') }}"><span>▦</span>Groups</a>
-        <a class="{{ 'active' if request.endpoint == 'vehicles' }}" href="{{ url_for('vehicles') }}"><span>▰</span>Vehicles</a>
         <a class="{{ 'active' if request.endpoint == 'history' }}" href="{{ url_for('history') }}"><span>◷</span>Audit history</a>
       {% endif %}
     </nav>
@@ -48,6 +47,26 @@
       {% block content %}{% endblock %}
 {% if current_user %}
     </main>
+  </div>
+{% endif %}
+{% if current_user and current_user.role == 'admin' %}
+  <div class="confirm-overlay" id="deleteEntryModal" hidden>
+    <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="deleteEntryTitle" aria-describedby="deleteEntryHelp deleteEntrySummary" tabindex="-1">
+      <button class="confirm-close" type="button" data-dismiss-delete aria-label="Close confirmation">&times;</button>
+      <span class="confirm-icon" aria-hidden="true">!</span>
+      <span class="eyebrow">Confirm deletion</span>
+      <h2 id="deleteEntryTitle">Delete this entry?</h2>
+      <p class="confirm-summary" id="deleteEntrySummary"></p>
+      <p id="deleteEntryHelp">This entry will be removed from totals and reports. Its audit history will be kept.</p>
+      <form id="deleteEntryForm" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="confirmed" value="yes">
+        <div class="confirm-actions">
+          <button class="btn secondary" type="button" data-dismiss-delete id="deleteEntryCancel">Cancel</button>
+          <button class="btn confirm-danger" type="submit" id="deleteEntrySubmit">Yes, delete entry</button>
+        </div>
+      </form>
+    </section>
   </div>
 {% endif %}
 </body>

@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 
 from openpyxl import load_workbook
 import test_app
-from app import Category, Group, Transaction, Adjustment, db, build_report
+from app import Category, Group, Transaction, Adjustment, db, build_report, particular_codes
 
 
 class GroupReportTests(unittest.TestCase):
@@ -78,7 +78,8 @@ class GroupReportTests(unittest.TestCase):
         self.assertLess(labels.index('Total Income'), labels.index('Expenditure Particulars'))
         self.assertLess(labels.index('Total Expenditure'), labels.index('Liquid P/L'))
         with self.app.app_context():
-            income_code = Category.query.filter_by(kind='income', name='income account').one().id
+            cat = Category.query.filter_by(kind='income', name='income account').one()
+            income_code = f"IP_{particular_codes()[cat.id]:04d}"
         self.assertIn((1, 'income account', income_code, 110, None), rows)
         html = response.data.decode()
         self.assertLess(html.index('Income Particulars'), html.index('Expenditure Particulars'))
@@ -104,3 +105,43 @@ class GroupReportTests(unittest.TestCase):
         for report_type in ['monthly', 'short', 'direct', 'rental', 'construction']:
             self.assertEqual(self.client.get('/reports?' + self.query(report_type=report_type)).status_code, 200)
         self.assertEqual(self.client.get('/reports?' + self.query([])).status_code, 200)
+
+    def test_report_code_order_and_compact_export_styles(self):
+        names = ['Trade Income', 'Bank Interest Income', 'Rental Income', 'Construction Projects Income', 'Inward Taxes']
+        with self.app.app_context():
+            for name in reversed(names):
+                cat = Category.query.filter_by(kind='income', group_name=name).first()
+                db.session.add(Transaction(category_id=cat.id, cash_date=self.day, reference='ORDER-CHECK',
+                    counterparty='', subtotal=100, total=100, created_by_id=1))
+            db.session.commit()
+            keys = [json.dumps(['income', name]) for name in reversed(names)]
+            report = build_report(self.day, self.day, selected_groups=keys)
+            self.assertEqual([g['name'] for g in report['sections'][0]['groups']], names)
+            self.assertEqual([g['label'] for g in report['summary']], names)
+            tax_id = Group.query.filter_by(kind='income', name='Inward Taxes').one().id
+        for kind in ['monthly', 'short']:
+            response = self.client.get('/reports/export?' + self.query(keys, kind))
+            wb = load_workbook(BytesIO(response.data))
+            ws = wb['Group Report']
+            label_col = 1 if kind == 'short' else 2
+            labels = [ws.cell(r, label_col).value for r in range(1, ws.max_row + 1)]
+            self.assertEqual(sorted(names, key=labels.index), names)
+            section_row = labels.index('Income Particulars') + 1
+            heading = ws.cell(section_row, label_col)
+            self.assertEqual(heading.fill.fgColor.rgb, '004B6575')
+            self.assertEqual(heading.font.sz, 13)
+            self.assertEqual(heading.font.color.rgb, '00FFFFFF')
+            total_row = labels.index('Total Income') + 1
+            for cell in ws[total_row]:
+                self.assertEqual(cell.border.top.style, 'thin')
+                self.assertEqual(cell.border.bottom.style, 'double')
+            self.assertEqual(ws.row_dimensions[section_row].height, 26)
+            if kind == 'monthly':
+                body_row = next(r for r in range(6, ws.max_row + 1) if ws.cell(r, 3).value)
+                self.assertEqual(ws.row_dimensions[body_row].height, 20)
+                self.assertEqual(ws.cell(body_row, 2).font.sz, 11)
+        # The report follows administrator-edited numeric codes, not alphabetical names.
+        self.client.post(f'/groups/{tax_id}/edit', data={'csrf_token':self.csrf(), 'name':'Inward Taxes', 'code':'5'})
+        with self.app.app_context():
+            report = build_report(self.day, self.day, selected_groups=keys)
+            self.assertEqual(report['sections'][0]['groups'][0]['name'], 'Inward Taxes')

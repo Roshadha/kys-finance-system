@@ -17,6 +17,14 @@ Copy the client folder to each PC and run Install KYS Finance Client.cmd once. I
 
 ## Data and safety
 
+### Easy restore on the server computer
+
+After completing installation, double-click **Restore KYS Backup** on the server desktop (or run **Restore KYS Backup.cmd** in the installed folder). Enter the current installation administrator username/password, choose the old `.db` file, review its transaction count and latest transaction date, and confirm. Restore replaces data and users; it does not merge two databases. The file must be from a compatible KYS database version and contain an active administrator.
+
+The wizard stops this installation's server, creates a verified safety database and session-key copy under `restore-recovery`, restores the selected snapshot and restarts the server after the wizard closes. Sign in using credentials stored in the restored backup. Other users are disconnected and must sign in again. No manual `.secret_key` copying is required: restore creates a new session key. The original backup is preserved. If the backup is from an incompatible older schema, the wizard refuses it and a version migration is needed.
+
+For an existing company installation, stop its server and replace the EXE, `_internal` and helper files with this release while preserving `data`, `backups`, `restore-recovery` and configuration. Rerun the installer from the SAME folder to add the Restore shortcut. Do not place a live database into a fresh unconfigured package; install first and use the wizard. Keep `restore-recovery` copies confidential and copy them off-PC if needed. An interrupted restore may leave `restore.lock`; inspect recovery copies and ensure no restore process is running before removing that lock.
+
 Never distribute data/, backups/, .secret_key or backup-target.txt inside a release. The installer refuses an unrecognized database and does not overwrite another shortcut's installation. Preserve the entire live data folder before upgrading. Restore a backup into a separate clean recovery installation, never over a running database; migration/restore installation support requires IT validation.
 
 HTTP is not encrypted. Use only an IT-approved restricted LAN, or have IT configure HTTPS before sensitive use. Windows 7 and Python 3.8 are out of support; this package cannot restore OS security support. Startup-folder launch has no crash-restart service.

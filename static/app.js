@@ -1,9 +1,94 @@
 document.addEventListener('DOMContentLoaded', () => {
+  const entryForm = document.getElementById('transactionForm');
+  if (entryForm && entryForm.dataset.periodUrl) {
+    const month = entryForm.elements.month_number;
+    const year = entryForm.elements.year;
+    const status = document.getElementById('entryPeriodStatus');
+    let periodQueue = Promise.resolve();
+    let selectionVersion = 0;
+    const saveEntryPeriod = () => {
+      const version = ++selectionVersion;
+      const data = new URLSearchParams({month_number: month.value, year: year.value,
+        csrf_token: entryForm.elements.csrf_token.value});
+      status.textContent = 'Remembering your selection…';
+      periodQueue = periodQueue.catch(() => {}).then(async () => {
+        try {
+          const response = await fetch(entryForm.dataset.periodUrl, {method: 'POST', body: data,
+            credentials: 'same-origin', keepalive: true});
+          if (!response.ok || response.redirected) throw new Error('Not saved');
+          if (version === selectionVersion) status.textContent = 'Month and year saved. They stay selected until you change them.';
+        } catch (_) {
+          if (version === selectionVersion) status.textContent = 'Could not remember this selection. Select it again to retry, or save your entry to remember it.';
+        }
+      });
+    };
+    month.addEventListener('change', saveEntryPeriod);
+    year.addEventListener('change', saveEntryPeriod);
+  }
+  const deleteModal = document.getElementById('deleteEntryModal');
+  const deleteForm = document.getElementById('deleteEntryForm');
+  const deleteSubmit = document.getElementById('deleteEntrySubmit');
+  let deleteTrigger = null;
+  let deletionPending = false;
+  const modalBackground = [];
+  const closeDeleteModal = () => {
+    if (!deleteModal || deletionPending) return;
+    deleteModal.hidden = true;
+    document.body.classList.remove('confirmation-open');
+    modalBackground.forEach(([el, previous]) => {
+      if (previous === null) el.removeAttribute('aria-hidden');
+      else el.setAttribute('aria-hidden', previous);
+    });
+    modalBackground.length = 0;
+    if (deleteTrigger) deleteTrigger.focus();
+  };
+  document.querySelectorAll('[data-confirm-delete]').forEach(link => {
+    link.addEventListener('click', event => {
+      if (!deleteModal || !deleteForm) return; // Keep the confirmation-page fallback.
+      event.preventDefault();
+      deleteTrigger = link;
+      deleteForm.action = link.href;
+      document.getElementById('deleteEntrySummary').textContent = link.dataset.entrySummary;
+      deleteModal.hidden = false;
+      document.body.classList.add('confirmation-open');
+      document.getElementById('deleteEntryCancel').focus();
+      document.querySelectorAll('.sidebar, .app-shell').forEach(el => {
+        modalBackground.push([el, el.getAttribute('aria-hidden')]);
+        el.setAttribute('aria-hidden', 'true');
+      });
+    });
+  });
+  if (deleteModal) {
+    deleteModal.querySelectorAll('[data-dismiss-delete]').forEach(button => button.addEventListener('click', closeDeleteModal));
+    deleteModal.addEventListener('click', event => { if (event.target === deleteModal) closeDeleteModal(); });
+    document.addEventListener('keydown', event => {
+      if (deleteModal.hidden) return;
+      if (event.key === 'Escape') { event.preventDefault(); closeDeleteModal(); }
+      if (event.key === 'Tab') {
+        const buttons = Array.from(deleteModal.querySelectorAll('button:not([disabled])'));
+        const first = buttons[0], last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    });
+    deleteForm.addEventListener('submit', event => {
+      if (deletionPending) { event.preventDefault(); return; }
+      deletionPending = true;
+      deleteSubmit.disabled = true;
+      deleteSubmit.textContent = 'Deleting…';
+    });
+    window.addEventListener('pageshow', () => {
+      deletionPending = false;
+      deleteSubmit.disabled = false;
+      deleteSubmit.textContent = 'Yes, delete entry';
+      closeDeleteModal();
+    });
+  }
   const menu = document.getElementById('menuButton');
   const sidebar = document.getElementById('sidebar');
   if (menu && sidebar) menu.addEventListener('click', () => sidebar.classList.toggle('open'));
 
-  const amounts = ['subtotal', 'sscl', 'vat'].map(id => document.getElementById(id)).filter(Boolean);
+  const amounts = ['subtotal'].map(id => document.getElementById(id)).filter(Boolean);
   const total = document.getElementById('grandTotal');
   const updateTotal = () => {
     if (!total) return;
@@ -30,39 +115,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const category = document.getElementById('categorySelect');
   const transactionGroup = document.getElementById('transactionGroupSelect');
-  const taxAmountRow = document.getElementById('taxAmountRow');
-  const updateTaxFields = () => {
-    if (!transactionGroup || !taxAmountRow) return;
-    const subtotalOnly = transactionGroup.options[transactionGroup.selectedIndex]?.dataset.subtotalOnly === '1';
-    taxAmountRow.hidden = subtotalOnly;
-    ['sscl', 'vat'].forEach(id => {
-      const input = document.getElementById(id);
-      if (!input) return;
-      if (subtotalOnly) input.value = '';
-      input.disabled = subtotalOnly;
-    });
-    updateTotal();
-  };
   const accountOptions = category ? Array.from(category.options).slice(1).map(option => option.cloneNode(true)) : [];
   const updateAccounts = () => {
     if (!category || !transactionGroup) return;
-    updateTaxFields();
     const previous = category.value;
     category.replaceChildren(new Option(transactionGroup.value ? 'Select an account' : 'Select a group first', ''));
     accountOptions.filter(option => option.dataset.group === transactionGroup.value).forEach(option => category.add(option.cloneNode(true)));
     if (Array.from(category.options).some(option => option.value === previous)) category.value = previous;
     if (transactionGroup.value && category.value && !Array.from(category.options).some(option => option.value === category.value)) category.value = '';
-    updateVehicle();
   };
-  const vehicle = document.getElementById('vehicleField');
-  const updateVehicle = () => {
-    if (!category || !vehicle) return;
-    const option = category.options[category.selectedIndex];
-    vehicle.classList.toggle('visible', option && option.dataset.vehicle === '1');
-  };
-  if (category) category.addEventListener('change', updateVehicle);
   if (transactionGroup) transactionGroup.addEventListener('change', updateAccounts);
-  if (transactionGroup) updateAccounts(); else updateVehicle();
+  if (transactionGroup) updateAccounts();
 
   const kind = document.getElementById('kindSelect');
   const group = document.getElementById('groupSelect');

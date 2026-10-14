@@ -1,0 +1,3 @@
+{% extends 'base.html' %}{% block page_title %}Edit group{% endblock %}{% block content %}
+<h1>Edit {{ item.kind }} group</h1><form method="post" class="card form-card single"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Group name<input name="name" value="{{ request.form.get('name', item.name) }}" required maxlength="100"></label><label>Group code<input name="code" type="text" maxlength="20" value="{{ request.form.get('code', group_labels[item.id]) }}" required></label><button class="btn primary">Save changes</button><a href="{{ url_for('groups') }}" class="btn secondary">Cancel</a></form>
+{% endblock %}

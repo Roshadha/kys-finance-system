@@ -6,6 +6,7 @@ group-report-update/
 kys-finance-group-reports.zip
 KYS-Finance-Company-Server-Windows*.zip
 KYS-Finance-Client*.zip
+KYS-Finance-Company-*.zip
 client/server.json
 client/*.tmp
 __pycache__/

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Edit entry · K.Y.S. Finance{% endblock %}
+{% block page_title %}Edit entry{% endblock %}
+{% block content %}
+<section class="hero-row compact"><div><span class="eyebrow">Administrator action</span><h1>Edit entry amount</h1><p>Enter the correct total directly. You do not need to calculate the difference.</p></div></section>
+<div class="narrow-grid">
+  <article class="card record-summary">
+    <span class="status {{ txn.category.kind }}">{{ txn.category.kind }}</span>
+    <h2>{{ txn.category.name }}</h2>
+    <dl><div><dt>Month</dt><dd>{{ txn.cash_date.strftime('%B %Y') }}</dd></div>
+      <div><dt>Reference</dt><dd>{{ txn.reference or '—' }}</dd></div>
+      <div><dt>Counterparty</dt><dd>{{ txn.counterparty or '—' }}</dd></div>
+      <div class="highlight"><dt>Current total</dt><dd>Rs. {{ current_total|money }}</dd></div></dl>
+    <p class="muted">This edits the cash total only. The original entry and every change remain in audit history.</p>
+  </article>
+  <form class="card form-card single" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="version" value="{{ version }}">
+    <label>Correct total (Rs.)<input id="subtotal" type="text" inputmode="decimal" name="total" value="{{ current_total|money }}" required aria-describedby="edit-total-help"></label>
+    <p class="muted" id="edit-total-help">For example, to change 12,000.00 to 10,000.00, enter 10,000.00.</p>
+    <label>Reason for editing<textarea name="reason" rows="3" required maxlength="240" placeholder="Why is this amount being corrected?">{{ request.form.get('reason', '') }}</textarea></label>
+    <button class="btn primary wide" type="submit">Save changes</button>
+    <a class="btn secondary wide" href="{{ url_for('transactions', year=txn.cash_date.year, month_number=txn.cash_date.month) }}">Cancel</a>
+  </form>
+</div>
+{% endblock %}

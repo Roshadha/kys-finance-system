@@ -6,6 +6,7 @@ $locked = $false
 try {
     $locked = $mutex.WaitOne(10000)
     if (-not $locked) { throw 'Another launch is in progress.' }
+    if (Test-Path -LiteralPath (Join-Path $root 'restore.lock')) { throw 'Database restore is in progress.' }
     if (-not (Test-Path -LiteralPath (Join-Path $root 'setup-complete.txt'))) { throw 'Run Install Company Server.cmd first.' }
     $existing = @(Get-Process -Name 'KYS Finance Server' -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $exe })
     if ($existing.Count) { return }

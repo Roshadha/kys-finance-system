@@ -5,6 +5,13 @@ import json
 import getpass
 from pathlib import Path
 
+if '--restore' in sys.argv:
+    from backup_restore import wizard
+    wizard(Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent.parent)
+    sys.exit(0)
+if (Path(sys.executable).resolve().parent / 'restore.lock').exists():
+    sys.exit('Database restore in progress. Start the server after restore completes.')
+
 os.environ['KYS_COMPANY_MODE'] = '1'
 configure = '--configure-admin' in sys.argv
 if configure:

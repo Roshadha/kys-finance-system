@@ -2,7 +2,7 @@
 {% block title %}P&L reports · K.Y.S. Finance{% endblock %}
 {% block page_title %}P&amp;L reports{% endblock %}
 {% block content %}
-<link rel="stylesheet" href="{{ url_for('static', filename='reports.css', v='neutral-20260930') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='reports.css', v='compact-20261014') }}">
 <section class="hero-row compact">
   <div><span class="eyebrow">Cash basis only</span><h1>Profit &amp; loss reporting</h1><p>Only actual money received and actually paid in the selected period is included.</p></div>
   <a class="btn excel" href="{{ url_for('reports_export', type=report_type, start=start, end=end, group=selected_groups) }}">↓ Export Excel</a>
@@ -14,8 +14,7 @@
       <option value="{{ value }}" {{ 'selected' if report_type == value }}>{{ label }}</option>
       {% endfor %}
     </select></label>
-    <label>From<input type="date" name="start" value="{{ start }}" required></label>
-    <label>To<input type="date" name="end" value="{{ end }}" required></label>
+    {% include 'month_fields.html' %}
     <button class="btn secondary" type="submit">Generate</button>
   </div>
   <details class="group-picker" open>
@@ -26,7 +25,7 @@
     {% for kind, label in [('income', 'Income groups'), ('expense', 'Expenditure groups')] %}
       <details class="group-dropdown"><summary>{{ label }} <span data-group-count="{{ kind }}">All</span></summary><div class="group-dropdown-list">
       {% for group in groups if group.kind == kind %}
-        <label class="check"><input type="checkbox" name="group" data-kind="{{ kind }}" value="{{ group.key }}" {{ 'checked' if group.key in selected_groups }}><span>{{ group.name }}</span></label>
+        <label class="check"><input type="checkbox" name="group" data-kind="{{ kind }}" value="{{ group.key }}" {{ 'checked' if group.key in selected_groups }}><span>{{ group.code }} · {{ group.name }}</span></label>
       {% endfor %}
       </div></details>
     {% endfor %}
@@ -41,7 +40,7 @@
   <div class="table-wrap"><table class="particulars-table">
     <thead><tr><th>Group</th><th class="number">Amount (LKR)</th></tr></thead>
     {% for section in data.sections if section.groups %}
-    <tbody><tr class="statement-section"><th colspan="2">{{ section.label }}</th></tr>
+    <tbody><tr class="statement-section"><th colspan="2">{{ section.label }} Particulars</th></tr>
     {% for group in section.groups %}<tr class="statement-subtotal"><td><b>{{ group.name }}</b></td><td class="number">{{ group.totals['Cash Total']|money }}</td></tr>{% endfor %}
     <tr class="statement-total"><td>Total {{ section.label }}</td><td class="number">{{ section.totals['Cash Total']|money }}</td></tr></tbody>
     {% endfor %}

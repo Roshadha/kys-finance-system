@@ -36,7 +36,8 @@ class TaxGroupTests(unittest.TestCase):
             ids = trade.id, inward.id, outward.id
 
         page = self.client.get("/transactions/new?kind=income")
-        self.assertIn(b'data-subtotal-only="1"', page.data)
+        self.assertNotIn(b'id="sscl"', page.data)
+        self.assertNotIn(b'id="vat"', page.data)
         self.assertIn(b'Inward Taxes', page.data)
         day = date.today().isoformat()
         invalid = self.client.post("/transactions/new?kind=income", data={

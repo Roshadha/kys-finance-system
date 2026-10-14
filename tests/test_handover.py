@@ -1,7 +1,6 @@
 """Isolated source-level checks; not a substitute for company LAN/PC testing."""
 import io
 import re
-import shutil
 import tempfile
 import threading
 import unittest
@@ -15,6 +14,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 from werkzeug.serving import make_server
 import app as finance
+from backup_restore import inspect_backup, restore_database
 
 
 class HandoverTests(unittest.TestCase):
@@ -65,9 +65,6 @@ class HandoverTests(unittest.TestCase):
                     _, backup, error = finance.make_backup(app, force_external=True)
                     self.assertIsNone(error)
                     self.assertTrue((backup / 'backup-complete.txt').exists())
-                    (restored / 'data').mkdir()
-                    for name in ('kys_finance.db', '.secret_key'):
-                        shutil.copy2(backup / name, restored / 'data' / name)
                 finally:
                     server.shutdown()
                     thread.join(timeout=10)
@@ -76,6 +73,17 @@ class HandoverTests(unittest.TestCase):
                         finance.db.session.remove()
                         finance.db.engine.dispose()
             with patch.object(finance, 'DATA_ROOT', restored):
+                # Exercise the actual restore engine against a fresh, separate
+                # installation instead of only copying the backup file.
+                fresh = finance.create_app({'TESTING': True, 'SQLALCHEMY_DATABASE_URI':
+                    'sqlite:///' + (restored / 'data' / 'kys_finance.db').as_posix()})
+                with fresh.app_context():
+                    self.assertEqual(finance.Transaction.query.count(), 0)
+                    finance.db.session.remove()
+                    finance.db.engine.dispose()
+                self.assertEqual(inspect_backup(backup / 'kys_finance.db', restored / 'data' / 'kys_finance.db'), (12, '2026-10-10'))
+                safety = restore_database(backup / 'kys_finance.db', restored)
+                self.assertTrue((safety / 'kys_finance.db').exists())
                 recovered = finance.create_app({'TESTING': True, 'SQLALCHEMY_DATABASE_URI':
                     'sqlite:///' + (restored / 'data' / 'kys_finance.db').as_posix()})
                 try:

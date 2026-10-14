@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from contextlib import closing
 from functools import wraps
 from io import BytesIO
@@ -29,7 +30,7 @@ from flask import (
 from flask_sqlalchemy import SQLAlchemy
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateIndex, CreateTable
@@ -443,7 +444,68 @@ def parse_money(value):
         raise ValueError("Enter a valid amount.")
 
 
+def month_period(values):
+    try:
+        start = date(int(values.get('year', '')), int(values.get('month_number', '')), 1)
+        if not 1900 <= start.year <= 9998:
+            raise ValueError()
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        return start, end
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError('Select a valid month and year.')
+
+
+def live_transactions():
+    deleted = select(AuditLog.entity_id).where(AuditLog.entity_type == 'transaction', AuditLog.action == 'delete')
+    return Transaction.query.filter(~func.cast(Transaction.id, db.String).in_(deleted))
+
+
+def group_codes():
+    codes = {g.id: numeric_part(g.id) // 10 for g in Group.query.all()}
+    for record in AuditLog.query.filter_by(entity_type='group', action='group_code').order_by(AuditLog.id).all():
+        codes[record.entity_id] = int(record.details)
+    return codes
+
+
+def particular_codes():
+    codes = {c.id: numeric_part(c.id) * 10 for c in Category.query.all()}
+    for record in AuditLog.query.filter_by(entity_type='category', action='account_code').order_by(AuditLog.id).all():
+        codes[record.entity_id] = int(record.details)
+    return codes
+
+
+def set_account_code(item, raw):
+    is_group = isinstance(item, Group)
+    prefix = (GROUP_PREFIX if is_group else CATEGORY_PREFIX)[item.kind] + '_'
+    raw = raw.strip().upper()
+    if raw.startswith(prefix):
+        raw = raw[len(prefix):]
+    if not raw.isdigit() or not 1 <= int(raw) <= 999999:
+        raise ValueError('Enter a numeric code or a code with the correct account prefix.')
+    model = Group if is_group else Category
+    codes = group_codes() if is_group else particular_codes()
+    if any(other.id != item.id and codes[other.id] == int(raw) for other in model.query.filter_by(kind=item.kind).all()):
+        raise ValueError('That code is already used for this account type.')
+    audit('group_code' if is_group else 'account_code', 'group' if is_group else 'category', item.id, str(int(raw)))
+
+
+def sorted_groups(items):
+    codes = group_codes()
+    return sorted(items, key=lambda g: (g.kind != 'income', codes.get(g.id, 0), g.id))
+
+
+def sorted_categories(items):
+    codes = group_codes()
+    particulars = particular_codes()
+    return sorted(items, key=lambda c: (c.kind != 'income', codes.get(c.group_id, 0), particulars[c.id], c.id))
+
+
 def period_from_request():
+    if 'month_number' in request.args or 'year' in request.args:
+        try:
+            return month_period(request.args)
+        except ValueError as exc:
+            abort(400, description=str(exc))
     today = date.today()
     start_default = today.replace(day=1)
     next_month = (start_default.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -457,7 +519,7 @@ def period_from_request():
 
 def base_transactions(start, end):
     return (
-        Transaction.query.join(Category)
+        live_transactions().join(Category)
         .filter(Transaction.cash_date.between(start, end))
         .order_by(Transaction.cash_date, Transaction.id)
         .all()
@@ -468,8 +530,11 @@ def report_groups():
     # Include historical category groups even when disabled for new entries.
     keys = {(g.kind, g.name) for g in Group.query.all()}
     keys.update((c.kind, c.group_name) for c in Category.query.all())
-    return [{"kind": kind, "name": name, "key": json.dumps([kind, name])}
-            for kind, name in sorted(keys, key=lambda k: (k[0] != "income", k[1]))]
+    ranks = {(g.kind, g.name): n for n, g in enumerate(sorted_groups(Group.query.all()))}
+    codes = group_codes()
+    labels = {(g.kind, g.name): format_id(GROUP_PREFIX[g.kind], codes[g.id], 4) for g in Group.query.all()}
+    return [{"kind": kind, "name": name, "code": labels.get((kind, name), ''), "key": json.dumps([kind, name])}
+            for kind, name in sorted(keys, key=lambda k: (k[0] != "income", ranks.get(k, 999999), k[1]))]
 
 
 def selected_report_groups():
@@ -481,6 +546,8 @@ def selected_report_groups():
 
 
 def build_report(start, end, report_type="monthly", selected_groups=None):
+    codes = particular_codes()
+    group_order = {(g['kind'], g['name']): rank for rank, g in enumerate(report_groups())}
     selected = {tuple(json.loads(key)) for key in (selected_groups or [])}
 
     def includes(c):
@@ -512,7 +579,7 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
             "Reference": txn.reference,
             "Type": c.kind.title(),
             "Group": c.group_name,
-            "Account Code": c.id,
+            "Account Code": format_id(CATEGORY_PREFIX[c.kind], codes[c.id], 4),
             "Particular": c.name,
             "Service / Property": c.service_line or c.entity_name or "—",
             "Counterparty": txn.counterparty,
@@ -536,9 +603,14 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
             key = row["Group"]
         grouped.setdefault(key, {"income": 0.0, "expense": 0.0})
         grouped[key][row["Type"].lower()] += row["Cash Total"]
+    summary_order = {}
+    for row in rows:
+        label = row['Service / Property'] if report_type in {'direct', 'rental'} else row['Group']
+        rank = group_order.get((row['Type'].lower(), row['Group']), 999999)
+        summary_order[label] = min(summary_order.get(label, rank), rank)
     summary = [
         {"label": key, **values, "pl": values["income"] - values["expense"]}
-        for key, values in sorted(grouped.items())
+        for key, values in sorted(grouped.items(), key=lambda item: (summary_order[item[0]], item[0]))
     ]
     columns = ["Subtotal", "SSCL", "VAT", "Adjustments", "Cash Total"]
     account_totals = {}
@@ -549,16 +621,16 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
     sections = []
     for kind in ("income", "expense"):
         groups = {}
-        for c in Category.query.filter_by(kind=kind).order_by(Category.group_name, Category.id).all():
+        for c in sorted_categories(Category.query.filter_by(kind=kind).all()):
             if not includes(c) or c.id not in account_totals:
                 continue
             group = groups.setdefault(c.group_name, {"name": c.group_name, "items": [], "totals": dict.fromkeys(columns, 0.0)})
             amounts = account_totals.get(c.id, dict.fromkeys(columns, 0.0))
-            group["items"].append({"code": c.id, "name": c.name, "amounts": amounts})
+            group["items"].append({"code": format_id(CATEGORY_PREFIX[c.kind], codes[c.id], 4), "name": c.name, "amounts": amounts})
             for col in columns:
                 group["totals"][col] += amounts[col]
         sections.append({"kind": kind, "label": "Income" if kind == "income" else "Expenditure",
-                         "groups": list(groups.values()),
+                         "groups": sorted(groups.values(), key=lambda g: (group_order.get((kind, g['name']), 999999), g['name'])),
                          "totals": {col: sum(g["totals"][col] for g in groups.values()) for col in columns}})
     return {"rows": rows, "summary": summary, "sections": sections, "columns": columns,
             "income": income, "expense": expense, "pl": income - expense}
@@ -594,7 +666,13 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
                     sheet.cell(row_index, col, row.get(header))
         grouped_rows = []
         styled_rows = []
-        def statement_row(label, amounts=None, code="", bold=False, number=""):
+        section_rows = []
+        total_rows = []
+        def statement_row(label, amounts=None, code="", bold=False, number="", style=None):
+            if style == 'section':
+                section_rows.append(len(grouped_rows) + 6)
+            elif style == 'total':
+                total_rows.append(len(grouped_rows) + 6)
             if bold:
                 styled_rows.append(len(grouped_rows) + 6)
             if report_type == "short":
@@ -607,7 +685,7 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
         for section in data["sections"]:
             if not section["groups"]:
                 continue
-            statement_row(section["label"] + " Particulars", bold=True)
+            statement_row(section["label"] + " Particulars", bold=True, style='section')
             for group in section["groups"]:
                 if report_type == "short":
                     statement_row(group["name"], group["totals"], bold=True)
@@ -616,8 +694,8 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
                     for number, item in enumerate(group["items"], start=1):
                         statement_row(item["name"], item["amounts"], item["code"], number=number)
                     statement_row(group["name"] + " — Total", group["totals"], bold=True)
-            statement_row("Total " + section["label"], section["totals"], bold=True)
-        statement_row("Liquid P/L", {col: data["pl"] if col == "Cash Total" else None for col in data["columns"]}, bold=True)
+            statement_row("Total " + section["label"], section["totals"], bold=True, style='total')
+        statement_row("Liquid P/L", {col: data["pl"] if col == "Cash Total" else None for col in data["columns"]}, bold=True, style='total')
         write_rows("Group Report", grouped_rows)
         write_rows("Summary", summary_rows)
         if report_type != "short":
@@ -652,29 +730,44 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
                         cell.data_type = "s"
         ws = workbook["Group Report"]
         ws.auto_filter.ref = None
-        ws.column_dimensions["A"].width = 14
-        ws.column_dimensions["B"].width = 58
-        for col in range(3, 6):
-            ws.column_dimensions[get_column_letter(col)].width = 20
+        widths = {'A': 58, 'B': 22} if report_type == 'short' else {'A': 6, 'B': 60, 'C': 15, 'D': 20, 'E': 20}
+        for letter, width in widths.items():
+            ws.column_dimensions[letter].width = width
+        ws.row_dimensions[5].height = 22
         for row in ws.iter_rows(min_row=6):
+            lines = 1
             for cell in row:
+                cell.font = Font(name='Calibri', size=11, color='29363E')
                 cell.alignment = Alignment(vertical="center", wrap_text=True,
                                            horizontal="right" if isinstance(cell.value, (int, float)) else "left")
                 cell.border = Border(bottom=Side(style="thin", color="D6E0DC"))
+                if isinstance(cell.value, str):
+                    capacity = max(1, int(ws.column_dimensions[cell.column_letter].width - 3))
+                    lines = max(lines, (len(cell.value) + capacity - 1) // capacity)
             if report_type != "short":
                 row[0].number_format = '0'
-            ws.row_dimensions[row[0].row].height = 32
+            ws.row_dimensions[row[0].row].height = 20 if lines == 1 else 15 * lines + 5
         for row_number in styled_rows:
             for cell in ws[row_number]:
-                cell.font = Font(bold=True, color="163C34")
-                cell.fill = PatternFill("solid", fgColor="EAF2EF")
+                cell.font = Font(name='Calibri', size=11, bold=True, color="29363E")
+                cell.fill = PatternFill("solid", fgColor="E8EDEE")
+        for row_number in section_rows:
+            ws.row_dimensions[row_number].height = 26
+            for cell in ws[row_number]:
+                cell.font = Font(name='Calibri', size=13, bold=True, color='FFFFFF')
+                cell.fill = PatternFill('solid', fgColor='4B6575')
+        for row_number in total_rows:
+            ws.row_dimensions[row_number].height = max(ws.row_dimensions[row_number].height, 23)
+            for cell in ws[row_number]:
+                cell.border = Border(top=Side(style='thin', color='4B6575'), bottom=Side(style='double', color='4B6575'))
+                cell.fill = PatternFill('solid', fgColor='F1F0EC')
         ws.sheet_properties.pageSetUpPr.fitToPage = True
         ws.page_setup.orientation = "landscape"
         ws.page_setup.paperSize = ws.PAPERSIZE_A4
         ws.page_setup.fitToWidth = 1
         ws.page_setup.fitToHeight = 0
         ws.print_title_rows = "1:5"
-        ws.print_area = f"A1:E{ws.max_row}"
+        ws.print_area = f"A1:{'B' if report_type == 'short' else 'E'}{ws.max_row}"
         ws.cell(ws.max_row + 2, 1, "Total Liquid Income − Total Expenditure = Liquid P/L")
         ws.cell(ws.max_row + 1, 1, f"{data['income']:,.2f} − {data['expense']:,.2f} = {data['pl']:,.2f} LKR")
         ws.print_area = f"A1:E{ws.max_row}"
@@ -688,12 +781,37 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
     return output
 
 
+def remembered_entry_period():
+    user = current_user()
+    if user:
+        record = AuditLog.query.filter_by(action='entry_period', entity_type='user',
+            entity_id=str(user.id)).order_by(AuditLog.id.desc()).first()
+        if record:
+            saved = parse_date(record.details)
+            if saved:
+                return saved.replace(day=1)
+    return parse_date(session.get('entry_month'), date.today().replace(day=1))
+
+
+def remember_entry_period(period):
+    record = AuditLog.query.filter_by(action='entry_period', entity_type='user',
+        entity_id=str(current_user().id)).order_by(AuditLog.id.desc()).first()
+    if not record or record.details != period.isoformat():
+        audit('entry_period', 'user', current_user().id, period.isoformat())
+    session['entry_month'] = period.isoformat()
+
+
 def register_context(app):
     @app.context_processor
     def shared():
+        gc, pc = group_codes(), particular_codes()
         return {
             "current_user": current_user(), "TASKS": TASKS, "ROLES": ROLES,
             "today": date.today(), "csrf_token": session.get("csrf_token", ""),
+            "entry_period": remembered_entry_period(),
+            "group_codes": gc,
+            "group_labels": {g.id: format_id(GROUP_PREFIX[g.kind], gc[g.id], 4) for g in Group.query.all()},
+            "particular_labels": {c.id: format_id(CATEGORY_PREFIX[c.kind], pc[c.id], 4) for c in Category.query.all()},
         }
 
     @app.template_filter("money")
@@ -744,26 +862,61 @@ def register_routes(app):
     def dashboard():
         today = date.today()
         start = today.replace(day=1)
-        data = build_report(start, today, "monthly")
-        recent = Transaction.query.order_by(Transaction.created_at.desc()).limit(7).all()
+        selected = request.args.get("month", "")
+        if 'month_number' in request.args:
+            try:
+                selected = month_period(request.args)[0].strftime('%Y-%m')
+            except ValueError as exc:
+                abort(400, description=str(exc))
+        if selected:
+            try:
+                start = date.fromisoformat(selected + "-01")
+                if start.strftime("%Y-%m") != selected:
+                    raise ValueError("Invalid month")
+            except ValueError:
+                abort(400)
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        data = build_report(start, end, "monthly")
+        recent = live_transactions().filter(Transaction.cash_date.between(start, end)).order_by(
+            Transaction.cash_date.desc(), Transaction.id.desc()).all()
         monthly = []
         for offset in range(5, -1, -1):
-            month = (today.replace(day=1) - timedelta(days=offset * 28)).replace(day=1)
+            month_index = today.year * 12 + today.month - 1 - offset
+            year, month_number = divmod(month_index, 12)
+            month = date(year, month_number + 1, 1)
             nxt = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
-            report = build_report(month, nxt - timedelta(days=1), "monthly")
-            monthly.append({"label": month.strftime("%b"), **report})
-        return render_template("dashboard.html", data=data, recent=recent, monthly=monthly)
+            month_end = nxt - timedelta(days=1)
+            report = build_report(month, month_end, "monthly")
+            monthly.append({**report, "label": month.strftime("%b"),
+                            "full_label": month.strftime("%B %Y"), "start": month, "end": month_end})
+        return render_template("dashboard.html", data=data, recent=recent, monthly=monthly,
+                               selected_start=start, selected_end=end,
+                               selected_label=start.strftime("%B %Y"))
 
     @app.get("/transactions")
     @login_required
     def transactions():
         start, end = period_from_request()
         kind = request.args.get("kind", "")
-        query = Transaction.query.join(Category).filter(Transaction.cash_date.between(start, end))
+        query = live_transactions().join(Category).filter(Transaction.cash_date.between(start, end))
         if kind in {"income", "expense"}:
             query = query.filter(Category.kind == kind)
         items = query.order_by(Transaction.cash_date.desc(), Transaction.id.desc()).all()
         return render_template("transactions.html", items=items, start=start, end=end, kind=kind)
+
+    @app.post('/account/entry-period')
+    @login_required
+    def entry_period_save():
+        user = current_user()
+        if not (user.can('income_entry') or user.can('expense_entry')):
+            abort(403)
+        try:
+            period, _ = month_period(request.form)
+        except ValueError as exc:
+            return {'error': str(exc)}, 400
+        remember_entry_period(period)
+        db.session.commit()
+        return {'month': period.isoformat()}
 
     @app.route("/transactions/new", methods=["GET", "POST"])
     @login_required
@@ -774,8 +927,8 @@ def register_routes(app):
         task = "income_entry" if requested_kind == "income" else "expense_entry"
         if not current_user().can(task):
             abort(403)
-        categories = Category.query.filter_by(kind=requested_kind, active=True).order_by(Category.group_name, Category.name).all()
-        vehicles = Vehicle.query.filter_by(active=True).order_by(Vehicle.identifier).all()
+        categories = sorted_categories(Category.query.join(Group, Category.group_id == Group.id).filter(
+            Category.kind == requested_kind, Category.active.is_(True), Group.active.is_(True)).all())
         if request.method == "POST":
             try:
                 category = db.session.get(Category, request.form.get("category_id", "").strip())
@@ -784,13 +937,16 @@ def register_routes(app):
                     raise ValueError("Select a group.")
                 if not category or category.kind != requested_kind or not category.active or category.group_name != selected_group:
                     raise ValueError("Select a valid account.")
-                cash_date = parse_date(request.form.get("cash_date"))
+                group = db.session.get(Group, category.group_id)
+                if not group or not group.active:
+                    raise ValueError('This group is disabled. Select an active group.')
+                cash_date = month_period(request.form)[0] if 'month_number' in request.form else parse_date(request.form.get("cash_date"))
                 if not cash_date:
                     raise ValueError("Select the actual cash date.")
                 subtotal = parse_money(request.form.get("subtotal"))
                 sscl = parse_money(request.form.get("sscl"))
                 vat = parse_money(request.form.get("vat"))
-                if (requested_kind, selected_group) in SUBTOTAL_ONLY_GROUPS and (sscl or vat):
+                if sscl or vat:
                     raise ValueError("Enter SSCL and VAT as separate tax particulars, not in these amount fields.")
                 if min(subtotal, sscl, vat) < 0:
                     raise ValueError("Amounts cannot be negative.")
@@ -799,11 +955,8 @@ def register_routes(app):
                     raise ValueError("Grand total must be greater than zero.")
                 reference = request.form.get("reference", "").strip()
                 counterparty = request.form.get("counterparty", "").strip()
-                vehicle_id = request.form.get("vehicle_id") or None
-                if "Vehicle Running" in category.name and not vehicle_id:
-                    raise ValueError("Choose the vehicle for this maintenance entry.")
                 item = Transaction(
-                    cash_date=cash_date, category_id=category.id, vehicle_id=int(vehicle_id) if vehicle_id else None,
+                    cash_date=cash_date, category_id=category.id,
                     reference=reference, counterparty=counterparty,
                     description=request.form.get("description", "").strip(), subtotal=subtotal,
                     sscl=sscl, vat=vat, total=total, created_by_id=current_user().id,
@@ -811,20 +964,79 @@ def register_routes(app):
                 db.session.add(item)
                 db.session.flush()
                 audit("create", "transaction", item.id, f"{requested_kind} {total:.2f} / {reference}")
+                remember_entry_period(cash_date.replace(day=1))
                 db.session.commit()
                 flash(f"Cash {requested_kind} saved. The ledger entry is now locked.", "success")
-                return redirect(url_for("transactions"))
+                return redirect(url_for("transaction_new", kind=requested_kind))
             except (ValueError, TypeError) as exc:
                 db.session.rollback()
                 flash(str(exc), "error")
         subtotal_only_groups = {name for kind, name in SUBTOTAL_ONLY_GROUPS if kind == requested_kind}
+        subtotal_only_groups.update(c.group_name for c in categories if c.service_line or c.name in {'SSCL', 'VAT'})
+        if requested_kind == 'expense':
+            subtotal_only_groups.update(c.group_name for c in categories)
         return render_template("transaction_form.html", kind=requested_kind, categories=categories,
-                               vehicles=vehicles, subtotal_only_groups=subtotal_only_groups)
+                               subtotal_only_groups=subtotal_only_groups)
+
+    @app.route('/transactions/<int:transaction_id>/delete', methods=['GET', 'POST'])
+    @role_required('admin')
+    def transaction_delete(transaction_id):
+        txn = live_transactions().filter_by(id=transaction_id).first_or_404()
+        if request.method == 'POST':
+            if request.form.get('confirmed') != 'yes':
+                flash('Please confirm before deleting this entry.', 'error')
+            else:
+                audit('delete', 'transaction', txn.id, json.dumps({'confirmation': 'Confirmed by administrator', 'reference': txn.reference,
+                    'date': txn.cash_date.isoformat(), 'total': str(txn.total),
+                    'deleted_cash_total': str(txn.adjusted_total), 'account': txn.category_id}))
+                db.session.commit()
+                flash('Entry deleted from totals and reports. Its audit record is retained.', 'success')
+                return redirect(url_for('transactions', year=txn.cash_date.year, month_number=txn.cash_date.month))
+        return render_template('transaction_delete.html', txn=txn)
+
+    @app.route("/transactions/<int:transaction_id>/edit", methods=["GET", "POST"])
+    @role_required("admin")
+    def transaction_edit(transaction_id):
+        # Serialize SQLite edits before reading the current amount/version.
+        if request.method == "POST" and db.engine.dialect.name == "sqlite":
+            db.session.execute(text("BEGIN IMMEDIATE"))
+        txn = live_transactions().filter_by(id=transaction_id).first_or_404()
+        current_total = txn.total + sum((item.amount for item in txn.adjustments), Decimal('0'))
+        version = str(max((item.id for item in txn.adjustments), default=0))
+        if request.method == "POST":
+            try:
+                if request.form.get('version') != version:
+                    raise ValueError('This entry changed since you opened it. Review the current amount and try again.')
+                raw_total = request.form.get('total', '').strip()
+                if not raw_total:
+                    raise ValueError('Enter the correct total amount.')
+                new_total = Decimal(str(parse_money(raw_total)))
+                reason = request.form.get('reason', '').strip()
+                if new_total <= 0:
+                    raise ValueError('The total must be greater than zero. Use Delete entry to remove an incorrect entry.')
+                if not reason or len(reason) > 240:
+                    raise ValueError('Enter a reason (up to 240 characters).')
+                difference = new_total - current_total
+                if difference:
+                    db.session.add(Adjustment(transaction_id=txn.id, effective_date=date.today(),
+                        amount=difference, reason=reason, created_by_id=current_user().id))
+                    audit('edit', 'transaction', txn.id, json.dumps({
+                        'previous_total': str(current_total), 'new_total': str(new_total), 'reason': reason}))
+                    db.session.commit()
+                    flash('Entry updated. The previous amount is retained in audit history.', 'success')
+                else:
+                    db.session.rollback()
+                    flash('No change: this entry already has that total.', 'info')
+                return redirect(url_for('transactions', year=txn.cash_date.year, month_number=txn.cash_date.month))
+            except ValueError as exc:
+                db.session.rollback()
+                flash(str(exc), 'error')
+        return render_template('transaction_edit.html', txn=txn, current_total=current_total, version=version)
 
     @app.route("/transactions/<int:transaction_id>/adjust", methods=["GET", "POST"])
     @role_required("admin")
     def adjustment_new(transaction_id):
-        txn = db.get_or_404(Transaction, transaction_id)
+        txn = live_transactions().filter_by(id=transaction_id).first_or_404()
         if request.method == "POST":
             try:
                 amount = parse_money(request.form.get("amount"))
@@ -954,16 +1166,11 @@ def register_routes(app):
             flash("User access updated.", "success")
         return redirect(url_for("users"))
 
-    @app.get("/vehicles")
-    @role_required("admin")
-    def vehicles():
-        return render_template("vehicles.html", vehicles=Vehicle.query.order_by(Vehicle.identifier).all())
-
     @app.get("/categories")
     @role_required("admin")
     def categories():
-        items = Category.query.order_by(Category.kind, Category.id).all()
-        groups = Group.query.filter_by(active=True).order_by(Group.kind, Group.id).all()
+        items = sorted_categories(Category.query.all())
+        groups = sorted_groups(Group.query.filter_by(active=True).all())
         return render_template("categories.html", categories=items, groups=groups)
 
     @app.post("/categories")
@@ -989,14 +1196,33 @@ def register_routes(app):
             )
             try:
                 db.session.add(item)
-                db.session.flush()  # the next IP_ id is generated here
+                db.session.flush()  # stable internal ID; public code is independently editable
+                raw_code = request.form.get('code', '').strip()
+                if not raw_code:
+                    codes = particular_codes()
+                    raw_code = str(max([0] + [codes[c.id] for c in Category.query.filter_by(kind=kind).all() if c.id != item.id]) + 100)
+                set_account_code(item, raw_code)
                 audit("create", "category", item.id, f"{kind}: {name}")
                 db.session.commit()
                 flash(f"Account particular added with code {item.id}.", "success")
-            except IntegrityError:
+            except (IntegrityError, ValueError):
                 db.session.rollback()
-                flash("Could not generate a unique ID. Please try again.", "error")
+                flash("Enter a valid unique particular code.", "error")
         return redirect(url_for("categories"))
+
+    @app.route('/categories/<category_id>/edit', methods=['GET', 'POST'])
+    @role_required('admin')
+    def category_edit(category_id):
+        item = db.get_or_404(Category, category_id)
+        if request.method == 'POST':
+            try:
+                set_account_code(item, request.form.get('code', ''))
+                db.session.commit()
+                return redirect(url_for('categories'))
+            except ValueError as exc:
+                db.session.rollback()
+                flash(str(exc), 'error')
+        return render_template('category_edit.html', item=item)
 
     @app.post("/categories/<category_id>/toggle")
     @role_required("admin")
@@ -1011,7 +1237,7 @@ def register_routes(app):
     @app.get("/groups")
     @role_required("admin")
     def groups():
-        items = Group.query.order_by(Group.kind, Group.name).all()
+        items = sorted_groups(Group.query.all())
         return render_template("groups.html", groups=items)
 
     @app.post("/groups")
@@ -1028,13 +1254,41 @@ def register_routes(app):
             try:
                 db.session.add(item)
                 db.session.flush()  # the next IG_ id is generated here
+                code = request.form.get('code', '').strip()
+                if not code:
+                    codes = group_codes()
+                    code = str(max([0] + [codes[g.id] for g in Group.query.filter_by(kind=kind).all() if g.id != item.id]) + 10)
+                set_account_code(item, code)
                 audit("create", "group", item.id, f"{kind}: {name}")
                 db.session.commit()
                 flash(f"Group added with code {item.id}.", "success")
-            except IntegrityError:
+            except (IntegrityError, ValueError):
                 db.session.rollback()
-                flash("Could not generate a unique ID. Please try again.", "error")
+                flash("Use a unique numeric group code and name.", "error")
         return redirect(url_for("groups"))
+
+    @app.route('/groups/<group_id>/edit', methods=['GET', 'POST'])
+    @role_required('admin')
+    def group_edit(group_id):
+        item = db.get_or_404(Group, group_id)
+        if request.method == 'POST':
+            try:
+                name = request.form.get('name', '').strip()
+                if not name or len(name) > 100:
+                    raise ValueError('Enter a group name (up to 100 characters).')
+                if any(g.id != item.id and g.name.lower() == name.lower() for g in Group.query.filter_by(kind=item.kind).all()):
+                    raise ValueError('That group name is already used.')
+                set_account_code(item, request.form.get('code', ''))
+                old = item.name
+                item.name = name
+                Category.query.filter_by(group_id=item.id).update({'group_name': name})
+                audit('rename', 'group', item.id, f'{old} -> {name}')
+                db.session.commit()
+                return redirect(url_for('groups'))
+            except ValueError as exc:
+                db.session.rollback()
+                flash(str(exc), 'error')
+        return render_template('group_edit.html', item=item)
 
     @app.post("/groups/<group_id>/toggle")
     @role_required("admin")
@@ -1045,27 +1299,6 @@ def register_routes(app):
         db.session.commit()
         flash("Group availability updated.", "success")
         return redirect(url_for("groups"))
-
-    @app.post("/vehicles")
-    @role_required("admin")
-    def vehicle_new():
-        identifier = request.form.get("identifier", "").strip()
-        if not identifier:
-            flash("Vehicle identifier is required.", "error")
-        elif Vehicle.query.filter(func.lower(Vehicle.identifier) == identifier.lower()).first():
-            flash("That vehicle identifier already exists.", "error")
-        else:
-            vehicle = Vehicle(
-                identifier=identifier,
-                registration_no=request.form.get("registration_no", "").strip(),
-                description=request.form.get("description", "").strip(),
-            )
-            db.session.add(vehicle)
-            db.session.flush()
-            audit("create", "vehicle", vehicle.id, identifier)
-            db.session.commit()
-            flash("Vehicle added.", "success")
-        return redirect(url_for("vehicles"))
 
     @app.post("/backup")
     @role_required("admin")
@@ -1276,17 +1509,14 @@ def seed_database():
 
     # Apply new tax accounts to both fresh and existing company databases.
     for kind, group_name in (("income", "Inward Taxes"), ("expense", "Tax Expenditure")):
+        existing_tax = Category.query.filter_by(kind=kind, name='SSCL').first()
+        if existing_tax:
+            group_name = existing_tax.group_name
         get_or_create_group(kind, group_name)
         for particular in ("SSCL", "VAT"):
             if not Category.query.filter_by(kind=kind, group_name=group_name, name=particular).first():
                 create_category(kind, group_name, particular)
 
-    if not Vehicle.query.first():
-        db.session.add_all([
-            Vehicle(identifier="A", description="Vehicle A"),
-            Vehicle(identifier="B", description="Vehicle B"),
-            Vehicle(identifier="C", description="Vehicle C"),
-        ])
     db.session.commit()
 
 

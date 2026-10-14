@@ -1,4 +1,19 @@
 /* Quiet neutral surfaces with small, desaturated slate accents. */
+.confirmation-open { overflow: hidden; }
+.confirm-overlay[hidden] { display: none; }
+.confirm-overlay { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(29, 40, 47, .48); }
+.confirm-dialog { position: relative; width: 100%; max-width: 460px; max-height: calc(100vh - 48px); overflow-y: auto; padding: 32px; border: 1px solid var(--line); border-radius: 24px; background: var(--white); color: var(--ink); box-shadow: 0 24px 80px rgba(29, 40, 47, .22); }
+.confirm-dialog h2 { margin: 10px 0 18px; font-size: 1.55rem; }
+.confirm-dialog p { color: var(--muted); line-height: 1.6; }
+.confirm-icon { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 14px; background: var(--red-bg); color: var(--red); font-size: 24px; font-weight: 700; margin-bottom: 20px; }
+.confirm-close { position: absolute; top: 16px; right: 16px; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; background: var(--surface-soft); color: var(--muted); font-size: 25px; cursor: pointer; }
+.confirm-summary { padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); color: var(--ink) !important; font-weight: 600; overflow-wrap: anywhere; }
+.confirm-actions { display: flex; gap: 12px; margin-top: 24px; }
+.confirm-actions .btn { flex: 1; justify-content: center; }
+.btn.confirm-danger { background: var(--red); color: var(--white); border: 1px solid var(--red); box-shadow: none; }
+.confirm-dialog button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.confirm-dialog button:disabled { opacity: .65; cursor: wait; }
+@media (max-width: 480px) { .confirm-overlay { padding: 16px; } .confirm-dialog { padding: 24px; } .confirm-actions { flex-direction: column; } }
 :root {
   --ink: #29363e;
   --muted: #58666d;
@@ -78,6 +93,18 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .pill, .equation { background: var(--white); }
 .equation { border-color: var(--line); }
 .tax-row[hidden] { display: none; }
+.chart-hint { margin: -8px 0 12px; color: var(--muted); font-size: .8rem; }
+.month-link { min-width: 0; border-radius: 8px; cursor: pointer; text-decoration: none; }
+.month-link:hover, .month-link:focus { background: rgba(var(--accent-rgb), .09); }
+.month-link:focus { outline: 2px solid var(--green); outline-offset: 3px; }
+.month-link span { padding: 3px 0; text-decoration: underline; text-underline-offset: 3px; }
+.month-link:hover span, .month-link:focus span { color: var(--ink); font-weight: 700; }
+.month-link[aria-current="date"] { background: var(--surface-selected); box-shadow: inset 0 -3px 0 var(--accent); }
+.month-link[aria-current="date"] span { color: var(--ink); font-weight: 700; }
+.ledger-actions { display: flex; flex-wrap: wrap; gap: 12px; min-width: 240px; }
+.ledger-actions .btn { min-height: 40px; padding: 9px 14px; font-size: .8rem; white-space: nowrap; }
+.ledger-actions .delete-action { color: var(--red); border-color: var(--red); }
+.ledger-actions .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 
 @media (max-width: 850px) {
   .login-shell { grid-template-columns: 1fr; }
