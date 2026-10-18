@@ -141,6 +141,29 @@ document.addEventListener('DOMContentLoaded', () => {
   if (kind) kind.addEventListener('change', updateGroups);
   updateGroups();
 
+  const bindCodePrefix = (formId, prefixes, newItem) => {
+    const form = document.getElementById(formId);
+    if (!form) return;
+    const type = form.elements.kind;
+    const code = form.elements.code;
+    const prefix = value => prefixes[value];
+    let previousPrefix = prefix(type.value);
+    if (newItem && !code.value.trim()) code.value = previousPrefix + '0';
+    type.addEventListener('change', () => {
+      const nextPrefix = prefix(type.value);
+      const current = code.value.trim().toUpperCase();
+      if (!current || current === previousPrefix || current === previousPrefix + '0') {
+        code.value = nextPrefix + '0';
+      } else if (current.startsWith(previousPrefix)) {
+        code.value = nextPrefix + current.slice(previousPrefix.length);
+      }
+      previousPrefix = nextPrefix;
+    });
+  };
+  bindCodePrefix('groupCreateForm', {income: 'IG_', expense: 'EG_'}, true);
+  bindCodePrefix('groupEditForm', {income: 'IG_', expense: 'EG_'}, false);
+  bindCodePrefix('categoryCreateForm', {income: 'IP_', expense: 'EP_'}, true);
+
   const role = document.getElementById('roleSelect');
   const tasks = document.getElementById('taskFieldset');
   const updateTasks = () => { if (role && tasks) tasks.hidden = role.value === 'admin'; };

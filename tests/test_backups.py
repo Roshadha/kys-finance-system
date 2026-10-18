@@ -11,6 +11,15 @@ import app as finance_app
 
 
 class BackupTests(unittest.TestCase):
+    def test_network_timeout_preserves_local_backup(self):
+        import subprocess
+        (self.root / 'backup-target.txt').write_text('not-used-by-mock')
+        with patch('app.subprocess.run', side_effect=subprocess.TimeoutExpired('worker', 30)):
+            local, remote, error = finance_app.make_backup(self.app)
+        self.assertTrue(local.exists())
+        self.assertIsNone(remote)
+        self.assertIn('timed out', error)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

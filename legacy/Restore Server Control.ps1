@@ -17,7 +17,9 @@ try {
     foreach ($process in $processes) {
         if ($process.CommandLine -like '*--restore*') { throw 'Another restore window is open. Close it first.' }
         if ($process.Terminate().ReturnValue -ne 0) { throw 'Unable to stop server.' }
-        Wait-Process -Id $process.ProcessId -ErrorAction SilentlyContinue
+        $deadline = (Get-Date).AddSeconds(15)
+        while ((Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+        if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) { throw 'Server did not exit; restore cancelled.' }
     }
     if (@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { $_.Port -eq 5000 }).Count) {
         throw 'A server is still listening on port 5000. Restore cannot continue.'

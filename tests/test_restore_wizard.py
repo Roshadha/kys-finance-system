@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 from contextlib import closing
 from werkzeug.security import generate_password_hash
-from backup_restore import authenticate, inspect_backup, restore_database
+from backup_restore import authenticate, inspect_backup, restore_database, migrate_staged_backup
 
 
 class RestoreTests(unittest.TestCase):
@@ -53,6 +53,18 @@ class RestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'administrator'):
             restore_database(self.backup, self.root)
         self.assertEqual(self.amount(self.live), 10)
+
+    def test_known_old_schema_migrates_staged_copy_only(self):
+        import shutil
+        with closing(sqlite3.connect(str(self.live))) as con:
+            con.execute('ALTER TABLE user ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT 0')
+            con.commit()
+        staged = self.root / 'staged.db'
+        shutil.copy2(self.backup, staged)
+        migrate_staged_backup(staged, self.live)
+        self.assertEqual(inspect_backup(staged, self.live)[0], 1)
+        with closing(sqlite3.connect(str(self.backup))) as con:
+            self.assertNotIn('deleted', {r[1] for r in con.execute('PRAGMA table_info(user)')})
 
     def test_secret_write_failure_rolls_back_database(self):
         with patch('backup_restore.os.replace', side_effect=OSError('disk unavailable')):

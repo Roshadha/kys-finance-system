@@ -1,1 +1,18 @@
-{% extends 'base.html' %}{% block page_title %}Edit particular code{% endblock %}{% block content %}<h1>{{ item.name }}</h1><form class="card form-card single" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Particular code<input name="code" required maxlength="20" value="{{ request.form.get('code', particular_labels[item.id]) }}"></label><button class="btn primary">Save code</button><a class="btn secondary" href="{{ url_for('categories') }}">Cancel</a></form>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Edit particular · K.Y.S. Finance{% endblock %}
+{% block page_title %}Edit particular{% endblock %}
+{% block content %}
+<section class="hero-row compact"><div><span class="eyebrow">Administrator action</span><h1>Edit particular</h1><p>Update the account details below. Changes to a used particular can also change how its older entries appear in reports.</p></div></section>
+<form class="card form-card single centered" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="field-grid">
+    <label>Type<select name="kind" id="kindSelect" required><option value="income" {{ 'selected' if request.form.get('kind', item.kind) == 'income' }}>Income</option><option value="expense" {{ 'selected' if request.form.get('kind', item.kind) == 'expense' }}>Expenditure</option></select></label>
+    <label>Group<select name="group_id" id="groupSelect" required><option value="" disabled>Select a group…</option>{% for group in groups %}<option value="{{ group.id }}" data-kind="{{ group.kind }}" {{ 'selected' if request.form.get('group_id', item.group_id) == group.id }}>{{ group_labels[group.id] }} · {{ group.name }}{% if not group.active %} (hidden){% endif %}</option>{% endfor %}</select></label>
+    <label>Particular code<input name="code" maxlength="20" required value="{{ request.form.get('code', particular_labels[item.id]) }}"></label>
+    <label>Particular name<input name="name" maxlength="180" required value="{{ request.form.get('name', item.name) }}"></label>
+    <label>Service line <span class="optional">Optional</span><select name="service_line">{% set selected_service = request.form.get('service_line', item.service_line or '') %}<option value="" {{ 'selected' if not selected_service }}>Not applicable</option><option value="Security" {{ 'selected' if selected_service == 'Security' }}>Security</option><option value="Cleaning" {{ 'selected' if selected_service == 'Cleaning' }}>Cleaning</option></select></label>
+    <label>Property / project <span class="optional">Optional</span><input name="entity_name" maxlength="140" value="{{ request.form.get('entity_name', item.entity_name or '') }}"></label>
+  </div>
+  <div class="form-actions"><a class="btn secondary" href="{{ url_for('categories') }}">Cancel</a><button class="btn primary" type="submit">Save changes</button></div>
+</form>
+{% endblock %}

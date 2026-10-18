@@ -6,12 +6,14 @@ import os
 import secrets
 import shutil
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from contextlib import closing
+from collections import deque
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
@@ -32,9 +34,10 @@ from flask import (
 from flask_sqlalchemy import SQLAlchemy
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from sqlalchemy import event, func, select, text
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from sqlalchemy import event, func, inspect, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.schema import CreateIndex, CreateTable
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -44,6 +47,19 @@ BASE_DIR = Path(__file__).resolve().parent
 # user data must remain beside the executable across upgrades and restarts.
 DATA_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else BASE_DIR
 db = SQLAlchemy()
+BACKUP_LOCK = threading.Lock()
+
+
+def serialized_backup(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        if not BACKUP_LOCK.acquire(timeout=45):
+            raise RuntimeError('Another backup is still running. Please retry later.')
+        try:
+            return function(*args, **kwargs)
+        finally:
+            BACKUP_LOCK.release()
+    return wrapped
 
 TASKS = {
     "income_entry": "Income data entry",
@@ -72,6 +88,7 @@ class User(db.Model):
     role = db.Column(db.String(30), nullable=False, default="data_entry")
     tasks_json = db.Column(db.Text, nullable=False, default="[]")
     active = db.Column(db.Boolean, nullable=False, default=True)
+    deleted = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
 
     @property
@@ -144,11 +161,11 @@ class Transaction(db.Model):
 
     @property
     def adjustment_total(self):
-        return sum(float(item.amount) for item in self.adjustments)
+        return sum((item.amount for item in self.adjustments), Decimal('0.00'))
 
     @property
     def adjusted_total(self):
-        return float(self.total) + self.adjustment_total
+        return self.total + self.adjustment_total
 
 
 class Adjustment(db.Model):
@@ -362,6 +379,8 @@ def create_app(test_config=None):
         ),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE='Lax',
     )
     if test_config:
         app.config.update(test_config)
@@ -369,9 +388,46 @@ def create_app(test_config=None):
     db.init_app(app)
 
     with app.app_context():
+        if db.engine.dialect.name == 'sqlite':
+            @event.listens_for(db.engine, 'connect')
+            def sqlite_policy(connection, _record):
+                cursor = connection.cursor()
+                try:
+                    cursor.execute('PRAGMA busy_timeout=10000')
+                    cursor.execute('PRAGMA synchronous=FULL')
+                finally:
+                    cursor.close()
+            with db.engine.connect() as connection:
+                connection.exec_driver_sql('PRAGMA journal_mode=WAL')
         migrate_integer_ids(db.engine, app.config.get("MIGRATION_BACKUP_DIR"))
         db.create_all()
+        # Existing company databases predate account deletion. Retain their
+        # user rows so ledger and audit foreign keys never lose attribution.
+        if "deleted" not in {column["name"] for column in inspect(db.engine).get_columns("user")}:
+            db_path = db.engine.url.database
+            if db.engine.dialect.name == "sqlite" and db_path and db_path != ":memory:":
+                backup_dir = Path(app.config.get("MIGRATION_BACKUP_DIR") or DATA_ROOT / "backups")
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_file = backup_dir / f"pre-user-migration-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
+                with closing(sqlite3.connect(db_path)) as source, closing(sqlite3.connect(str(backup_file))) as snapshot:
+                    source.backup(snapshot)
+                    if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise RuntimeError("User migration backup failed validation; accounts were not changed.")
+            with db.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE user ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT 0"))
         seed_database()
+        if db.engine.dialect.name == 'sqlite':
+            # Migrations above use their own transaction strategy. Enforce links
+            # for request connections only after validating the existing data.
+            with db.engine.connect() as connection:
+                if connection.exec_driver_sql('PRAGMA foreign_key_check').first():
+                    raise RuntimeError('Database has broken record links; restore a verified backup before starting.')
+            @event.listens_for(db.engine, 'connect')
+            def sqlite_foreign_keys(connection, _record):
+                connection.execute('PRAGMA foreign_keys=ON')
+            db.session.remove()
+            if db.engine.url.database != ':memory:':
+                db.engine.dispose()
 
     register_routes(app)
     register_context(app)
@@ -390,7 +446,13 @@ def audit(action, entity_type, entity_id=None, details=""):
 
 def current_user():
     uid = session.get("user_id")
-    return db.session.get(User, uid) if uid else None
+    user = db.session.get(User, uid) if uid else None
+    if user and not user.deleted:
+        stamp = session.get('auth_stamp')
+        if not stamp or not secrets.compare_digest(stamp, hashlib.sha256(user.password_hash.encode()).hexdigest()):
+            return None
+        return user
+    return None
 
 
 def login_required(view):
@@ -435,14 +497,32 @@ def parse_date(value, fallback=None):
         return fallback
 
 
+def report_period_from_request():
+    args = request.args
+    if 'from_month' not in args and 'from_year' not in args:
+        return period_from_request()
+    try:
+        first, end = month_period({'year': args.get('from_year'), 'month_number': args.get('from_month')})
+        if args.get('period_mode') != 'one' and (args.get('to_year') or args.get('to_month')):
+            last, end = month_period({'year': args.get('to_year'), 'month_number': args.get('to_month')})
+            if last < first:
+                first, end = last, month_period({'year': first.year, 'month_number': first.month})[1]
+        return first, end
+    except ValueError as exc:
+        abort(400, description=str(exc))
+
+
 def parse_money(value):
     try:
         cleaned = str(value or "0").replace(",", "").strip()
-        amount = float(cleaned)
-        if not -1_000_000_000_000 < amount < 1_000_000_000_000:
+        amount = Decimal(cleaned)
+        if not amount.is_finite() or abs(amount) >= Decimal('1000000000000'):
             raise ValueError
-        return round(amount, 2)
-    except (TypeError, ValueError):
+        amount = amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        if abs(amount) >= Decimal('1000000000000'):
+            raise ValueError
+        return amount
+    except (TypeError, ValueError, InvalidOperation):
         raise ValueError("Enter a valid amount.")
 
 
@@ -460,6 +540,13 @@ def month_period(values):
 def live_transactions():
     deleted = select(AuditLog.entity_id).where(AuditLog.entity_type == 'transaction', AuditLog.action == 'delete')
     return Transaction.query.filter(~func.cast(Transaction.id, db.String).in_(deleted))
+
+
+def period_is_closed(day):
+    key = day.strftime('%Y-%m')
+    latest = AuditLog.query.filter_by(entity_type='period', entity_id=key).filter(
+        AuditLog.action.in_(['period_close', 'period_open'])).order_by(AuditLog.id.desc()).first()
+    return bool(latest and latest.action == 'period_close')
 
 
 def group_codes():
@@ -522,6 +609,7 @@ def period_from_request():
 def base_transactions(start, end):
     return (
         live_transactions().join(Category)
+        .options(selectinload(Transaction.category), selectinload(Transaction.adjustments))
         .filter(Transaction.cash_date.between(start, end))
         .order_by(Transaction.cash_date, Transaction.id)
         .all()
@@ -548,6 +636,8 @@ def selected_report_groups():
 
 
 def build_report(start, end, report_type="monthly", selected_groups=None):
+    if live_transactions().filter(Transaction.cash_date.between(start, end)).limit(25001).count() > 25000:
+        abort(400, 'This report exceeds 25,000 entries. Select a shorter period.')
     codes = particular_codes()
     group_order = {(g['kind'], g['name']): rank for rank, g in enumerate(report_groups())}
     selected = {tuple(json.loads(key)) for key in (selected_groups or [])}
@@ -585,10 +675,10 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
             "Particular": c.name,
             "Service / Property": c.service_line or c.entity_name or "—",
             "Counterparty": txn.counterparty,
-            "Subtotal": float(txn.subtotal),
-            "SSCL": float(txn.sscl),
-            "VAT": float(txn.vat),
-            "Original Total": float(txn.total),
+            "Subtotal": txn.subtotal,
+            "SSCL": txn.sscl,
+            "VAT": txn.vat,
+            "Original Total": txn.total,
             "Adjustments": txn.adjustment_total,
             "Cash Total": adjusted,
         })
@@ -603,7 +693,7 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
             key = row["Service / Property"]
         else:
             key = row["Group"]
-        grouped.setdefault(key, {"income": 0.0, "expense": 0.0})
+        grouped.setdefault(key, {"income": Decimal('0.00'), "expense": Decimal('0.00')})
         grouped[key][row["Type"].lower()] += row["Cash Total"]
     summary_order = {}
     for row in rows:
@@ -617,7 +707,7 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
     columns = ["Subtotal", "SSCL", "VAT", "Adjustments", "Cash Total"]
     account_totals = {}
     for row in rows:
-        totals = account_totals.setdefault(row["Category ID"], dict.fromkeys(columns, 0.0))
+        totals = account_totals.setdefault(row["Category ID"], dict.fromkeys(columns, Decimal('0.00')))
         for col in columns:
             totals[col] += row[col]
     sections = []
@@ -626,8 +716,8 @@ def build_report(start, end, report_type="monthly", selected_groups=None):
         for c in sorted_categories(Category.query.filter_by(kind=kind).all()):
             if not includes(c) or c.id not in account_totals:
                 continue
-            group = groups.setdefault(c.group_name, {"name": c.group_name, "items": [], "totals": dict.fromkeys(columns, 0.0)})
-            amounts = account_totals.get(c.id, dict.fromkeys(columns, 0.0))
+            group = groups.setdefault(c.group_name, {"name": c.group_name, "items": [], "totals": dict.fromkeys(columns, Decimal('0.00'))})
+            amounts = account_totals.get(c.id, dict.fromkeys(columns, Decimal('0.00')))
             group["items"].append({"code": format_id(CATEGORY_PREFIX[c.kind], codes[c.id], 4), "name": c.name, "amounts": amounts})
             for col in columns:
                 group["totals"][col] += amounts[col]
@@ -665,7 +755,10 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
                 sheet.cell(5, col, header)
             for row_index, row in enumerate(rows, 6):
                 for col, header in enumerate(headers, 1):
-                    sheet.cell(row_index, col, row.get(header))
+                    value = row.get(header)
+                    if isinstance(value, str):
+                        value = ILLEGAL_CHARACTERS_RE.sub('', value)
+                    sheet.cell(row_index, col, value)
         grouped_rows = []
         styled_rows = []
         section_rows = []
@@ -726,7 +819,7 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
                 ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 42)
             for row in ws.iter_rows(min_row=6):
                 for cell in row:
-                    if isinstance(cell.value, (int, float)):
+                    if isinstance(cell.value, (int, float, Decimal)):
                         cell.number_format = '#,##0.00;[Red]-#,##0.00'
                     elif cell.data_type == "f":
                         cell.data_type = "s"
@@ -741,7 +834,7 @@ def export_report_xlsx(start, end, report_type, selected_groups=None):
             for cell in row:
                 cell.font = Font(name='Calibri', size=11, color='29363E')
                 cell.alignment = Alignment(vertical="center", wrap_text=True,
-                                           horizontal="right" if isinstance(cell.value, (int, float)) else "left")
+                                           horizontal="right" if isinstance(cell.value, (int, float, Decimal)) else "left")
                 cell.border = Border(bottom=Side(style="thin", color="D6E0DC"))
                 if isinstance(cell.value, str):
                     capacity = max(1, int(ws.column_dimensions[cell.column_letter].width - 3))
@@ -819,7 +912,7 @@ def register_context(app):
 
     @app.template_filter("money")
     def money(value):
-        return f"{float(value or 0):,.2f}"
+        return f"{value or 0:,.2f}"
 
     @app.before_request
     def csrf_and_session():
@@ -831,6 +924,23 @@ def register_context(app):
             token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
             if not secrets.compare_digest(token or "", session.get("csrf_token", "")):
                 abort(400, "Invalid or expired form token. Refresh the page and try again.")
+            financial = {'transaction_new', 'transaction_edit', 'transaction_delete', 'adjustment_new', 'period_status'}
+            if request.endpoint in financial and current_user() and current_user().active:
+                # Lock before checking closed status and hold it through commit.
+                # Period close/reopen and posting therefore cannot race.
+                if db.engine.dialect.name == 'sqlite':
+                    db.session.execute(text('BEGIN IMMEDIATE'))
+                posting_date = None
+                if request.endpoint == 'transaction_new':
+                    try:
+                        posting_date = month_period(request.form)[0] if 'month_number' in request.form else parse_date(request.form.get('cash_date'))
+                    except ValueError:
+                        pass  # Normal form validation gives the detailed message.
+                elif request.endpoint != 'period_status':
+                    txn = db.session.get(Transaction, (request.view_args or {}).get('transaction_id'))
+                    posting_date = txn.cash_date if txn else None
+                if posting_date and period_is_closed(posting_date):
+                    abort(409, 'This month is closed. An administrator must reopen it with a reason before changing entries.')
 
 
 def data_revision():
@@ -842,29 +952,69 @@ def data_revision():
 
 
 def register_routes(app):
+    login_attempts = {}
+    login_lock = threading.Lock()
+    @app.errorhandler(OperationalError)
+    def database_unavailable(error):
+        db.session.rollback()
+        app.logger.exception('Database operation failed')
+        return render_template('error.html', code=503, message='Database is busy or unavailable. Check the ledger before retrying a save.'), 503
+
+    @app.errorhandler(IntegrityError)
+    def database_conflict(error):
+        db.session.rollback()
+        return render_template('error.html', code=409, message='This change conflicts with another record. Refresh and review before retrying.'), 409
     @app.get('/updates/version')
     def updates_version():
         user = current_user()
         if not user or not user.active:
             return {'error': 'Sign in required'}, 401, {'Cache-Control': 'no-store'}
-        return {'version': data_revision()}, 200, {'Cache-Control': 'no-store'}
+        version = data_revision()
+        if request.if_none_match.contains(version):
+            response = app.response_class(status=304)
+        else:
+            response = app.json.response({'version': version})
+        response.set_etag(version)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
 
     @app.get("/health")
     def health():
+        db.session.execute(text('SELECT 1'))
         return {"status": "ok", "database": "connected", "service": "kys-finance"}
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
         if request.method == "POST":
             username = request.form.get("username", "").strip()
+            key = request.remote_addr or 'unknown'
+            now = time.monotonic()
+            with login_lock:
+                expired = [address for address, attempts in login_attempts.items() if not attempts or attempts[-1] < now - 300]
+                for address in expired:
+                    del login_attempts[address]
+                if len(login_attempts) >= 10000 and key not in login_attempts:
+                    abort(429, 'Too many login attempts. Try again later.')
+                attempts = login_attempts.setdefault(key, deque())
+                while attempts and attempts[0] < now - 300:
+                    attempts.popleft()
+                if len(attempts) >= 10:
+                    abort(429, 'Too many login attempts. Wait five minutes before trying again.')
+                attempts.append(now)
             user = User.query.filter(func.lower(User.username) == username.lower()).first()
-            if user and user.active and check_password_hash(user.password_hash, request.form.get("password", "")):
+            if user and user.active and not user.deleted and check_password_hash(user.password_hash, request.form.get("password", "")):
+                with login_lock:
+                    login_attempts.pop(key, None)
                 session.clear()
                 session["user_id"] = user.id
+                session['auth_stamp'] = hashlib.sha256(user.password_hash.encode()).hexdigest()
                 session["csrf_token"] = secrets.token_urlsafe(24)
                 audit("login", "user", user.id, "Successful sign in")
                 db.session.commit()
-                return redirect(request.args.get("next") or url_for("dashboard"))
+                destination = request.args.get('next', '')
+                if not destination.startswith('/') or destination.startswith('//') or '\\' in destination:
+                    destination = url_for('dashboard')
+                return redirect(destination)
             flash("The username or password is incorrect.", "error")
         return render_template("login.html")
 
@@ -880,6 +1030,12 @@ def register_routes(app):
     @app.get("/")
     @login_required
     def dashboard():
+        if not current_user().can('view_reports'):
+            if current_user().can('income_entry'):
+                return redirect(url_for('transaction_new', kind='income'))
+            if current_user().can('expense_entry'):
+                return redirect(url_for('transaction_new', kind='expense'))
+            abort(403)
         today = date.today()
         start = today.replace(day=1)
         selected = request.args.get("month", "")
@@ -898,7 +1054,7 @@ def register_routes(app):
         end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
         data = build_report(start, end, "monthly")
         recent = live_transactions().filter(Transaction.cash_date.between(start, end)).order_by(
-            Transaction.cash_date.desc(), Transaction.id.desc()).all()
+            Transaction.cash_date.desc(), Transaction.id.desc()).limit(20).all()
         monthly = []
         for offset in range(5, -1, -1):
             month_index = today.year * 12 + today.month - 1 - offset
@@ -919,10 +1075,13 @@ def register_routes(app):
         start, end = period_from_request()
         kind = request.args.get("kind", "")
         query = live_transactions().join(Category).filter(Transaction.cash_date.between(start, end))
+        if not current_user().can('view_reports'):
+            query = query.filter(Transaction.created_by_id == current_user().id)
         if kind in {"income", "expense"}:
             query = query.filter(Category.kind == kind)
-        items = query.order_by(Transaction.cash_date.desc(), Transaction.id.desc()).all()
-        return render_template("transactions.html", items=items, start=start, end=end, kind=kind)
+        page = max(1, request.args.get('page', 1, type=int))
+        paged = query.options(selectinload(Transaction.category), selectinload(Transaction.adjustments), selectinload(Transaction.created_by)).order_by(Transaction.cash_date.desc(), Transaction.id.desc()).paginate(page=page, per_page=100, error_out=False)
+        return render_template("transactions.html", items=paged.items, pagination=paged, start=start, end=end, kind=kind)
 
     @app.post('/account/entry-period')
     @login_required
@@ -1017,9 +1176,7 @@ def register_routes(app):
     @app.route("/transactions/<int:transaction_id>/edit", methods=["GET", "POST"])
     @role_required("admin")
     def transaction_edit(transaction_id):
-        # Serialize SQLite edits before reading the current amount/version.
-        if request.method == "POST" and db.engine.dialect.name == "sqlite":
-            db.session.execute(text("BEGIN IMMEDIATE"))
+        # Financial POSTs are serialized in csrf_and_session before period checks.
         txn = live_transactions().filter_by(id=transaction_id).first_or_404()
         current_total = txn.total + sum((item.amount for item in txn.adjustments), Decimal('0'))
         version = str(max((item.id for item in txn.adjustments), default=0))
@@ -1082,19 +1239,37 @@ def register_routes(app):
     @app.get("/reports")
     @task_required("view_reports")
     def reports():
-        start, end = period_from_request()
+        start, end = report_period_from_request()
         report_type = request.args.get("type", "monthly")
         if report_type not in {"monthly", "short"}:
             report_type = "monthly"
         groups, selected_groups = selected_report_groups()
         data = build_report(start, end, report_type, selected_groups)
         return render_template("reports.html", data=data, start=start, end=end, report_type=report_type,
-                               groups=groups, selected_groups=selected_groups)
+                               groups=groups, selected_groups=selected_groups,
+                               period_closed=period_is_closed(start))
+
+    @app.post('/reports/period-status')
+    @role_required('admin')
+    def period_status():
+        try:
+            month, _ = month_period(request.form)
+        except ValueError as error:
+            abort(400, str(error))
+        reason = request.form.get('reason', '').strip()
+        action = request.form.get('action')
+        if action not in {'close', 'open'} or not reason or len(reason) > 240:
+            abort(400, 'Choose close/reopen and enter a reason (1–240 characters).')
+        audit('period_close' if action == 'close' else 'period_open', 'period',
+              month.strftime('%Y-%m'), json.dumps({'reason': reason}))
+        db.session.commit()
+        flash('Month closed.' if action == 'close' else 'Month reopened. Changes restate this month’s P&L.', 'success')
+        return redirect(url_for('reports', year=month.year, month_number=month.month))
 
     @app.get("/reports/export")
     @task_required("view_reports")
     def reports_export():
-        start, end = period_from_request()
+        start, end = report_period_from_request()
         report_type = request.args.get("type", "monthly")
         if report_type not in {"monthly", "short"}:
             report_type = "monthly"
@@ -1117,7 +1292,7 @@ def register_routes(app):
     @app.get("/users")
     @role_required("admin")
     def users():
-        return render_template("users.html", users=User.query.order_by(User.active.desc(), User.display_name).all())
+        return render_template("users.html", users=User.query.filter_by(deleted=False).order_by(User.active.desc(), User.display_name).all())
 
     @app.route("/users/new", methods=["GET", "POST"])
     @role_required("admin")
@@ -1127,8 +1302,8 @@ def register_routes(app):
                 username = request.form.get("username", "").strip()
                 password = request.form.get("password", "")
                 role = request.form.get("role", "data_entry")
-                if not username or len(password) < 8 or role not in ROLES:
-                    raise ValueError("Use a username, valid role, and password of at least 8 characters.")
+                if not username or len(password) < 6 or role not in ROLES:
+                    raise ValueError("Use a username, valid role, and password of at least 6 characters.")
                 if User.query.filter(func.lower(User.username) == username.lower()).first():
                     raise ValueError("That username is already in use.")
                 user = User(
@@ -1153,30 +1328,46 @@ def register_routes(app):
     @role_required("admin")
     def user_edit(user_id):
         user = db.get_or_404(User, user_id)
+        if user.deleted:
+            abort(404)
         if request.method == "POST":
+            username = request.form.get("username", user.username).strip()
             role = request.form.get("role", "data_entry")
             password = request.form.get("password", "")
-            if role not in ROLES:
-                flash("Select a valid role.", "error")
-            elif password and len(password) < 8:
-                flash("A reset password must be at least 8 characters.", "error")
-            else:
+            active = request.form.get("active", "yes" if user.active else "no") == "yes"
+            try:
+                if not username or role not in ROLES:
+                    raise ValueError("Enter a username and select a valid role.")
+                if password and len(password) < 6:
+                    raise ValueError("A reset password must be at least 6 characters.")
+                existing = User.query.filter(func.lower(User.username) == username.lower(), User.id != user.id).first()
+                if existing:
+                    raise ValueError("That username is already in use, including by a deleted account.")
+                if user.id == current_user().id and (not active or role != "admin"):
+                    raise ValueError("You cannot disable or remove administrator access from your own account.")
                 user.display_name = request.form.get("display_name", "").strip() or user.username
+                user.username = username
                 user.department = request.form.get("department", "").strip()
                 user.role = role
+                user.active = active
                 user.tasks_json = json.dumps(request.form.getlist("tasks"))
                 if password:
                     user.set_password(password)
-                audit("update", "user", user.id, f"Role/tasks updated for {user.username}")
+                audit("update", "user", user.id, f"Account details updated for {user.username}; active={active}")
                 db.session.commit()
-                flash("User role and task assignments updated.", "success")
+                flash("User account updated.", "success")
                 return redirect(url_for("users"))
+            except ValueError as exc:
+                db.session.rollback()
+                flash(str(exc), "error")
         return render_template("user_form.html", edit_user=user)
 
     @app.post("/users/<int:user_id>/toggle")
     @role_required("admin")
     def user_toggle(user_id):
         user = db.get_or_404(User, user_id)
+        if user.deleted:
+            abort(404)
         if user.id == current_user().id:
             flash("You cannot disable your own signed-in account.", "error")
         else:
@@ -1185,6 +1376,27 @@ def register_routes(app):
             db.session.commit()
             flash("User access updated.", "success")
         return redirect(url_for("users"))
+
+    @app.route("/users/<int:user_id>/delete", methods=["GET", "POST"])
+    @role_required("admin")
+    def user_delete(user_id):
+        user = db.get_or_404(User, user_id)
+        if user.deleted:
+            abort(404)
+        if request.method == "POST":
+            if user.id == current_user().id:
+                flash("You cannot delete your own signed-in account.", "error")
+                return redirect(url_for("users"))
+            if request.form.get("confirmed") != "yes":
+                flash("Confirm account deletion first.", "error")
+                return redirect(url_for("user_delete", user_id=user_id))
+            user.deleted = True
+            user.active = False
+            audit("delete", "user", user.id, f"Deleted account {user.username}; ledger and audit attribution retained")
+            db.session.commit()
+            flash("User access removed. Past ledger and audit records are retained.", "success")
+            return redirect(url_for("users"))
+        return render_template("user_delete.html", edit_user=user)
 
     @app.get("/categories")
     @role_required("admin")
@@ -1217,8 +1429,8 @@ def register_routes(app):
             try:
                 db.session.add(item)
                 db.session.flush()  # stable internal ID; public code is independently editable
-                raw_code = request.form.get('code', '').strip()
-                if not raw_code:
+                raw_code = request.form.get('code', '').strip().upper()
+                if raw_code in {'', CATEGORY_PREFIX[kind] + '_0'}:
                     codes = particular_codes()
                     raw_code = str(max([0] + [codes[c.id] for c in Category.query.filter_by(kind=kind).all() if c.id != item.id]) + 100)
                 set_account_code(item, raw_code)
@@ -1236,13 +1448,48 @@ def register_routes(app):
         item = db.get_or_404(Category, category_id)
         if request.method == 'POST':
             try:
-                set_account_code(item, request.form.get('code', ''))
+                kind = request.form.get('kind', item.kind)
+                group_id = request.form.get('group_id', item.group_id)
+                name = request.form.get('name', item.name).strip()
+                service_line = request.form.get('service_line', item.service_line or '').strip()
+                entity_name = request.form.get('entity_name', item.entity_name or '').strip()
+                group = db.session.get(Group, group_id)
+                if kind not in {'income', 'expense'}:
+                    raise ValueError('Select a valid account type.')
+                if not group or group.kind != kind or (not group.active and group.id != item.group_id):
+                    raise ValueError('Select an available group for that account type.')
+                if not name or len(name) > 180:
+                    raise ValueError('Enter a particular name (up to 180 characters).')
+                if service_line not in {'', 'Security', 'Cleaning'} or len(entity_name) > 140:
+                    raise ValueError('Select a valid service line and enter a property / project up to 140 characters.')
+                old = {'kind': item.kind, 'group_id': item.group_id, 'name': item.name,
+                       'service_line': item.service_line, 'entity_name': item.entity_name}
+                if (kind != item.kind or group.id != item.group_id) and Transaction.query.filter_by(category_id=item.id).first():
+                    raise ValueError('This particular has posted entries. Create a new particular instead of changing its type or group.')
+                old_code = format_id(CATEGORY_PREFIX[item.kind], particular_codes()[item.id], 4)
+                raw_code = request.form.get('code', old_code).strip()
+                if kind != item.kind and raw_code.upper() == old_code:
+                    raw_code = str(particular_codes()[item.id])
+                item.kind = kind
+                item.group_id = group.id
+                item.group_name = group.name
+                item.name = name
+                item.service_line = service_line or None
+                item.entity_name = entity_name or None
+                set_account_code(item, raw_code)
+                audit('edit', 'category', item.id, json.dumps({'before': old, 'after': {
+                    'kind': item.kind, 'group_id': item.group_id, 'name': item.name,
+                    'service_line': item.service_line, 'entity_name': item.entity_name,
+                    'code': format_id(CATEGORY_PREFIX[item.kind], int(raw_code.split('_')[-1]), 4),
+                }}))
                 db.session.commit()
+                flash('Particular updated.', 'success')
                 return redirect(url_for('categories'))
             except ValueError as exc:
                 db.session.rollback()
                 flash(str(exc), 'error')
-        return render_template('category_edit.html', item=item)
+        available = Group.query.filter((Group.active == True) | (Group.id == item.group_id)).all()
+        return render_template('category_edit.html', item=item, groups=sorted_groups(available))
 
     @app.post("/categories/<category_id>/toggle")
     @role_required("admin")
@@ -1274,8 +1521,8 @@ def register_routes(app):
             try:
                 db.session.add(item)
                 db.session.flush()  # the next IG_ id is generated here
-                code = request.form.get('code', '').strip()
-                if not code:
+                code = request.form.get('code', '').strip().upper()
+                if code in {'', GROUP_PREFIX[kind] + '_0'}:
                     codes = group_codes()
                     code = str(max([0] + [codes[g.id] for g in Group.query.filter_by(kind=kind).all() if g.id != item.id]) + 10)
                 set_account_code(item, code)
@@ -1293,21 +1540,34 @@ def register_routes(app):
         item = db.get_or_404(Group, group_id)
         if request.method == 'POST':
             try:
+                kind = request.form.get('kind', item.kind)
                 name = request.form.get('name', '').strip()
+                if kind not in {'income', 'expense'}:
+                    raise ValueError('Select a valid group type.')
                 if not name or len(name) > 100:
                     raise ValueError('Enter a group name (up to 100 characters).')
-                if any(g.id != item.id and g.name.lower() == name.lower() for g in Group.query.filter_by(kind=item.kind).all()):
+                if any(g.id != item.id and g.name.lower() == name.lower() for g in Group.query.filter_by(kind=kind).all()):
                     raise ValueError('That group name is already used.')
-                set_account_code(item, request.form.get('code', ''))
-                old = item.name
+                if kind != item.kind and Category.query.filter_by(group_id=item.id).first():
+                    raise ValueError('Move this group’s particulars to other groups before changing its type. This protects existing financial entries.')
+                old = {'kind': item.kind, 'name': item.name,
+                       'code': format_id(GROUP_PREFIX[item.kind], group_codes()[item.id], 4)}
+                raw_code = request.form.get('code', old['code']).strip()
+                if kind != item.kind and raw_code.upper() == old['code']:
+                    raw_code = str(group_codes()[item.id])
+                item.kind = kind
                 item.name = name
+                set_account_code(item, raw_code)
                 Category.query.filter_by(group_id=item.id).update({'group_name': name})
-                audit('rename', 'group', item.id, f'{old} -> {name}')
+                audit('edit', 'group', item.id, json.dumps({'before': old, 'after': {
+                    'kind': kind, 'name': name,
+                    'code': format_id(GROUP_PREFIX[kind], group_codes()[item.id], 4),
+                }}))
                 db.session.commit()
                 return redirect(url_for('groups'))
-            except ValueError as exc:
+            except (ValueError, IntegrityError) as exc:
                 db.session.rollback()
-                flash(str(exc), 'error')
+                flash(str(exc) if isinstance(exc, ValueError) else 'That group name is already used for this type.', 'error')
         return render_template('group_edit.html', item=item)
 
     @app.post("/groups/<group_id>/toggle")
@@ -1335,7 +1595,7 @@ def register_routes(app):
         return redirect(url_for("dashboard"))
 
     @app.route("/account/password", methods=["GET", "POST"])
-    @login_required
+    @role_required("admin")
     def change_password():
         user = current_user()
         if request.method == "POST":
@@ -1343,8 +1603,8 @@ def register_routes(app):
             new = request.form.get("new_password", "")
             if not check_password_hash(user.password_hash, current):
                 flash("Current password is incorrect.", "error")
-            elif len(new) < 8:
-                flash("New password must be at least 8 characters.", "error")
+            elif len(new) < 6:
+                flash("New password must be at least 6 characters.", "error")
             else:
                 user.set_password(new)
                 audit("password", "user", user.id, "Password changed")
@@ -1362,7 +1622,8 @@ def register_routes(app):
         return render_template("error.html", code=404, message="The requested record or page was not found."), 404
 
 
-def make_backup(app, force_external=False):
+@serialized_backup
+def make_backup(app, force_external=False, local_only=False):
     database_uri = app.config["SQLALCHEMY_DATABASE_URI"]
     if not database_uri.startswith("sqlite:///"):
         raise RuntimeError("Automatic file backup is only available for SQLite.")
@@ -1382,7 +1643,7 @@ def make_backup(app, force_external=False):
         old.unlink(missing_ok=True)
     external_path = None
     external_error = None
-    if (DATA_ROOT / "backup-target.txt").exists():
+    if not local_only and (DATA_ROOT / "backup-target.txt").exists():
         try:
             external_path = copy_external_backup(destination, force=force_external)
         except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
@@ -1392,36 +1653,24 @@ def make_backup(app, force_external=False):
 
 
 def copy_external_backup(local_backup, force=False):
-    target = Path((DATA_ROOT / "backup-target.txt").read_text(encoding="utf-8-sig").strip())
-    if not target.is_absolute() or not target.is_dir():
-        raise RuntimeError("Configured external backup folder is unavailable.")
-    if target.resolve() == DATA_ROOT.resolve() or DATA_ROOT.resolve() in target.resolve().parents:
-        raise RuntimeError("External backup folder must be outside the application folder.")
-    day = datetime.now().strftime("%Y-%m-%d")
-    stamp = datetime.now().strftime("%H%M%S_%f")
-    backup_dir = target / "KYS-Finance-Backups" / (f"{day}_{stamp}" if force else day)
-    complete = backup_dir / "backup-complete.txt"
-    if (not force and complete.exists() and (backup_dir / "kys_finance.db").exists()
-            and (backup_dir / ".secret_key").exists()):
-        return backup_dir
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    temporary = backup_dir / "kys_finance.db.tmp"
-    shutil.copy2(local_backup, temporary)
-    with closing(sqlite3.connect(temporary)) as check_db:
-        if check_db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise RuntimeError("External backup integrity check failed.")
-    temporary.replace(backup_dir / "kys_finance.db")
-    secret = DATA_ROOT / "data" / ".secret_key"
-    secret_temp = backup_dir / ".secret_key.tmp"
-    if secret.exists():
-        shutil.copy2(secret, secret_temp)
-    elif os.environ.get("KYS_SECRET_KEY"):
-        secret_temp.write_text(os.environ["KYS_SECRET_KEY"], encoding="utf-8")
+    from backup_copy import copy_snapshot  # Included in frozen dependency graph.
+    arguments = [str(DATA_ROOT), str(local_backup), '1' if force else '0']
+    if getattr(sys, 'frozen', False):
+        command = [sys.executable, '--copy-backup'] + arguments
     else:
-        raise RuntimeError("Session secret is unavailable for the external backup.")
-    secret_temp.replace(backup_dir / ".secret_key")
-    complete.write_text(f"Verified {datetime.now().isoformat(timespec='seconds')}\n", encoding="utf-8")
-    return backup_dir
+        command = [sys.executable, str(Path(__file__).with_name('backup_copy.py'))] + arguments
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('Network backup timed out after 30 seconds. The local backup is safe.')
+    try:
+        response = json.loads(result.stdout)
+    except ValueError:
+        raise RuntimeError('External backup worker could not start.')
+    if result.returncode or 'error' in response:
+        raise RuntimeError(response.get('error', 'External backup failed.'))
+    return Path(response['path'])
 
 
 def start_backup_worker(app):

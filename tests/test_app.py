@@ -4,13 +4,67 @@ from datetime import date
 from unittest.mock import patch
 from html import unescape
 import re
+from werkzeug.security import check_password_hash
 
 os.environ["KYS_DISABLE_BACKUP"] = "1"
 
-from app import Adjustment, Category, Transaction, User, Group, AuditLog, build_report, group_codes, particular_codes, sorted_categories, seed_database, create_app, db
+from app import Adjustment, Category, Transaction, User, Group, AuditLog, build_report, group_codes, particular_codes, sorted_groups, sorted_categories, seed_database, create_app, db
 
 
 class FinanceAppTests(unittest.TestCase):
+    def test_closed_month_blocks_edit_delete_and_reopen_restores_access(self):
+        self.login()
+        with self.app.app_context():
+            item = Transaction(cash_date=date(2026, 1, 1), category_id=Category.query.first().id,
+                created_by_id=User.query.filter_by(username='admin').one().id,
+                reference='lock', counterparty='', subtotal=100, total=100)
+            db.session.add(item)
+            db.session.commit()
+            identifier = item.id
+        fields = {'csrf_token': self.csrf(), 'year': '2026', 'month_number': '1', 'action': 'close', 'reason': 'Month approved'}
+        self.assertEqual(self.client.post('/reports/period-status', data=fields).status_code, 302)
+        for suffix in ('edit', 'delete', 'adjust'):
+            self.assertEqual(self.client.post('/transactions/{}/{}'.format(identifier, suffix), data={'csrf_token': self.csrf(), 'confirmed': 'yes'}).status_code, 409)
+        fields['action'] = 'open'
+        fields['reason'] = 'Approved correction'
+        self.assertEqual(self.client.post('/reports/period-status', data=fields).status_code, 302)
+        self.assertEqual(self.client.post('/transactions/{}/delete'.format(identifier), data={'csrf_token': self.csrf(), 'confirmed': 'yes'}).status_code, 302)
+
+    def test_login_throttle_and_old_sessions_revoked(self):
+        self.client.get('/login')
+        for _ in range(10):
+            self.client.post('/login', data={'csrf_token': self.csrf(), 'username': 'missing', 'password': 'wrong'})
+        self.assertEqual(self.client.post('/login', data={'csrf_token': self.csrf()}).status_code, 429)
+        with self.client.session_transaction() as state:
+            state['user_id'] = 1
+            state.pop('auth_stamp', None)
+        self.assertEqual(self.client.get('/').status_code, 302)
+
+    def test_decimal_input_rounding_and_invalid_values(self):
+        from app import parse_money
+        from decimal import Decimal
+        self.assertEqual(parse_money('2.675'), Decimal('2.68'))
+        for value in ('NaN', 'Infinity', '999999999999.999'):
+            with self.assertRaises(ValueError):
+                parse_money(value)
+
+    def test_used_particular_cannot_reclassify_historic_entries(self):
+        self.login()
+        with self.app.app_context():
+            category = Category.query.filter_by(kind='income').first()
+            expense = Group.query.filter_by(kind='expense').first()
+            identifier, group_id = category.id, expense.id
+            db.session.add(Transaction(cash_date=date(2026, 1, 1), category_id=identifier,
+                created_by_id=User.query.filter_by(username='admin').one().id,
+                reference='guard', counterparty='', subtotal=100, total=100))
+            db.session.commit()
+        response = self.client.post('/categories/' + identifier + '/edit', data={
+            'csrf_token': self.csrf(), 'kind': 'expense', 'group_id': group_id,
+            'name': 'Reclassified', 'code': 'EP_9900'})
+        self.assertIn(b'posted entries', response.data)
+        with self.app.app_context():
+            self.assertEqual(db.session.get(Category, identifier).kind, 'income')
+
     def setUp(self):
         self.app = create_app({
             "TESTING": True,
@@ -34,6 +88,36 @@ class FinanceAppTests(unittest.TestCase):
         self.assertEqual(self.login("management", "Manage@2026").status_code, 302)
         self.assertEqual(self.client.get("/reports").status_code, 200)
         self.assertEqual(self.client.get("/users").status_code, 403)
+
+    def test_only_admin_sees_or_uses_change_password(self):
+        self.login("management", "Manage@2026")
+        with self.app.app_context():
+            original_hash = User.query.filter_by(username="management").one().password_hash
+        self.assertNotIn(b'title="Change password"', self.client.get("/").data)
+        self.assertEqual(self.client.get("/account/password").status_code, 403)
+        self.assertEqual(self.client.post("/account/password", data={
+            "csrf_token": self.csrf(), "current_password": "Manage@2026",
+            "new_password": "NewSecret123",
+        }).status_code, 403)
+        with self.app.app_context():
+            self.assertEqual(User.query.filter_by(username="management").one().password_hash, original_hash)
+
+    def test_report_month_range_and_single_month_override(self):
+        self.login()
+        with self.app.app_context():
+            category = Category.query.filter_by(kind='income').first()
+            admin = User.query.filter_by(username='admin').one()
+            for month, amount in [(5, 10), (6, 100), (9, 200), (10, 1000)]:
+                db.session.add(Transaction(category_id=category.id, created_by_id=admin.id,
+                    cash_date=date(2026, month, 15), reference='RANGE', counterparty='',
+                    subtotal=amount, total=amount, sscl=0, vat=0))
+            db.session.commit()
+        query = 'from_year=2026&from_month=6&to_year=2026&to_month=9'
+        self.assertIn(b'Rs. 300.00', self.client.get('/reports?' + query).data)
+        self.assertIn(b'Rs. 100.00', self.client.get('/reports?' + query + '&period_mode=one').data)
+        self.assertIn(b'Rs. 300.00', self.client.get('/reports?from_year=2026&from_month=9&to_year=2026&to_month=6').data)
+        self.assertEqual(self.client.get('/reports/export?' + query).status_code, 200)
+        self.assertEqual(self.client.get('/reports?from_year=2026&from_month=13').status_code, 400)
 
     def test_live_updates_across_users_and_entry_changes(self):
         self.assertEqual(self.client.get('/updates/version').status_code, 401)
@@ -83,6 +167,8 @@ class FinanceAppTests(unittest.TestCase):
                 return cls(2024, 3, 1)
 
         self.login("recovery", "KysRec@2026")
+        self.assertEqual(self.client.get('/').status_code, 302)
+        self.login('management', 'Manage@2026')
         with patch("app.date", MarchFirst):
             page = self.client.get("/")
         self.assertEqual(page.status_code, 200)
@@ -136,6 +222,82 @@ class FinanceAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         with self.app.app_context():
             self.assertIn("view_reports", User.query.filter_by(username="recovery").one().tasks)
+
+    def test_admin_can_edit_every_account_field_and_delete_without_losing_history(self):
+        self.login()
+        with self.app.app_context():
+            staff = User.query.filter_by(username='recovery').one()
+            admin = User.query.filter_by(username='admin').one()
+            category = Category.query.filter_by(name='Security Service Income').one()
+            staff_id = staff.id
+            admin_id = admin.id
+            db.session.add(Transaction(category_id=category.id, cash_date=date(2024, 1, 1),
+                reference='STAFF-HISTORY', counterparty='', subtotal=10, sscl=0, vat=0,
+                total=10, created_by_id=staff_id))
+            db.session.commit()
+        edit_page = self.client.get(f'/users/{staff_id}/edit')
+        self.assertIn(b'name="username"', edit_page.data)
+        self.assertIn(b'name="active"', edit_page.data)
+        response = self.client.post(f'/users/{staff_id}/edit', data={
+            'csrf_token': self.csrf(), 'username': 'accounts', 'display_name': 'Accounts Team',
+            'department': 'Finance', 'role': 'management', 'active': 'yes',
+            'tasks': ['view_reports'], 'password': 'New456',
+        })
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            staff = db.session.get(User, staff_id)
+            self.assertEqual((staff.username, staff.display_name, staff.department, staff.role),
+                             ('accounts', 'Accounts Team', 'Finance', 'management'))
+            self.assertEqual(staff.tasks, ['view_reports'])
+            self.assertTrue(check_password_hash(staff.password_hash, 'New456'))
+            self.assertEqual(Transaction.query.filter_by(reference='STAFF-HISTORY').one().created_by_id, staff_id)
+        other = self.app.test_client()
+        other.get('/login')
+        with other.session_transaction() as state:
+            token = state['csrf_token']
+        self.assertIn(b'incorrect', other.post('/login', data={
+            'csrf_token': token, 'username': 'recovery', 'password': 'KysRec@2026',
+        }).data)
+        self.assertEqual(other.post('/login', data={
+            'csrf_token': token, 'username': 'accounts', 'password': 'New456',
+        }).status_code, 302)
+        self.assertEqual(self.client.post(f'/users/{admin_id}/delete', data={
+            'csrf_token': self.csrf(), 'confirmed': 'yes',
+        }).status_code, 302)
+        self.assertEqual(self.client.get('/users').status_code, 200)
+        self.assertEqual(self.client.get(f'/users/{staff_id}/delete').status_code, 200)
+        self.assertEqual(self.client.post(f'/users/{staff_id}/delete', data={
+            'csrf_token': self.csrf(), 'confirmed': 'yes',
+        }).status_code, 302)
+        self.assertEqual(self.client.get(f'/users/{staff_id}/edit').status_code, 404)
+        self.assertNotIn(b'Accounts Team', self.client.get('/users').data)
+        self.assertEqual(other.get('/reports').status_code, 302)
+        with self.app.app_context():
+            staff = db.session.get(User, staff_id)
+            self.assertTrue(staff.deleted)
+            self.assertFalse(staff.active)
+            self.assertEqual(Transaction.query.filter_by(reference='STAFF-HISTORY').one().created_by.username, 'accounts')
+            self.assertIsNotNone(AuditLog.query.filter_by(action='delete', entity_type='user', entity_id=str(staff_id)).first())
+
+    def test_user_edit_rejects_duplicate_username_and_self_lockout(self):
+        self.login()
+        with self.app.app_context():
+            admin_id = User.query.filter_by(username='admin').one().id
+            staff_id = User.query.filter_by(username='recovery').one().id
+        response = self.client.post(f'/users/{staff_id}/edit', data={
+            'csrf_token': self.csrf(), 'username': 'MANAGEMENT', 'display_name': 'Recovery',
+            'role': 'data_entry', 'active': 'yes',
+        })
+        self.assertIn(b'already in use', response.data)
+        response = self.client.post(f'/users/{admin_id}/edit', data={
+            'csrf_token': self.csrf(), 'username': 'admin', 'display_name': 'Admin',
+            'role': 'management', 'active': 'no',
+        })
+        self.assertIn(b'cannot disable', response.data)
+        with self.app.app_context():
+            admin = db.session.get(User, admin_id)
+            self.assertTrue(admin.active)
+            self.assertEqual(admin.role, 'admin')
 
     def test_month_entry_remembered_and_expense_tax_rejected(self):
         self.login()
@@ -215,6 +377,84 @@ class FinanceAppTests(unittest.TestCase):
         self.assertEqual(self.client.post(f'/categories/{cid}/edit',data={'csrf_token':self.csrf(),'code':'10'}).status_code,403)
         self.assertEqual(self.client.post(f'/groups/{gid}/edit',data={'csrf_token':self.csrf(),'name':group,'code':'10'}).status_code,403)
 
+    def test_admin_can_edit_all_particular_fields_and_actions_are_separate(self):
+        self.login()
+        with self.app.app_context():
+            item = Category.query.filter_by(name='Office Expenditure').one()
+            item_id = item.id
+            other_group = Group.query.filter(Group.kind == 'expense', Group.id != item.group_id).first()
+            self.assertIsNotNone(other_group)
+            group_id = other_group.id
+        listing = self.client.get('/categories').data
+        self.assertIn(b'class="account-action"', listing)
+        self.assertIn(b'class="account-action account-action-hide"', listing)
+        groups_listing = self.client.get('/groups').data
+        self.assertIn(b'class="account-actions"', groups_listing)
+        self.assertIn(b'class="account-action account-action-hide"', groups_listing)
+        with self.app.app_context():
+            hidden_category = Category.query.filter_by(name='Bank Interest Received').one()
+            hidden_group = Group.query.filter_by(kind='income', name='Bank Interest Income').one()
+            hidden_category_id, hidden_group_id = hidden_category.id, hidden_group.id
+        self.client.post(f'/categories/{hidden_category_id}/toggle', data={'csrf_token': self.csrf()})
+        self.client.post(f'/groups/{hidden_group_id}/toggle', data={'csrf_token': self.csrf()})
+        self.assertIn(b'class="account-action account-action-enable"', self.client.get('/categories').data)
+        self.assertIn(b'class="account-action account-action-enable"', self.client.get('/groups').data)
+        edit_page = self.client.get(f'/categories/{item_id}/edit').data
+        for field in (b'name="kind"', b'name="group_id"', b'name="code"',
+                      b'name="name"', b'name="service_line"', b'name="entity_name"'):
+            self.assertIn(field, edit_page)
+        response = self.client.post(f'/categories/{item_id}/edit', data={
+            'csrf_token': self.csrf(), 'kind': 'expense', 'group_id': group_id,
+            'code': 'EP_9999', 'name': 'Updated Office Expenditure',
+            'service_line': 'Cleaning', 'entity_name': 'Project A',
+        })
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            item = db.session.get(Category, item_id)
+            self.assertEqual((item.group_id, item.group_name, item.name),
+                             (group_id, other_group.name, 'Updated Office Expenditure'))
+            self.assertEqual((item.service_line, item.entity_name), ('Cleaning', 'Project A'))
+            self.assertEqual(particular_codes()[item_id], 9999)
+            self.assertIsNotNone(AuditLog.query.filter_by(action='edit', entity_type='category', entity_id=item_id).first())
+        invalid = self.client.post(f'/categories/{item_id}/edit', data={
+            'csrf_token': self.csrf(), 'kind': 'income', 'group_id': group_id,
+            'code': 'IP_9998', 'name': 'Wrong group',
+        })
+        self.assertEqual(invalid.status_code, 200)
+        with self.app.app_context():
+            self.assertEqual(db.session.get(Category, item_id).name, 'Updated Office Expenditure')
+
+    def test_six_character_passwords_are_accepted_but_five_are_not(self):
+        self.login()
+        self.assertIn(b'minlength="6"', self.client.get('/users/new').data)
+        self.client.post('/users/new', data={
+            'csrf_token': self.csrf(), 'username': 'sixuser', 'display_name': 'Six User',
+            'department': 'Accounts', 'role': 'data_entry', 'password': 'Abc123',
+        })
+        self.client.post('/users/new', data={
+            'csrf_token': self.csrf(), 'username': 'fiveuser', 'display_name': 'Five User',
+            'department': 'Accounts', 'role': 'data_entry', 'password': 'Ab123',
+        })
+        with self.app.app_context():
+            six = User.query.filter_by(username='sixuser').one()
+            self.assertTrue(check_password_hash(six.password_hash, 'Abc123'))
+            self.assertIsNone(User.query.filter_by(username='fiveuser').first())
+            six_id = six.id
+        self.client.post(f'/users/{six_id}/edit', data={
+            'csrf_token': self.csrf(), 'display_name': 'Six User', 'role': 'data_entry',
+            'password': 'New456',
+        })
+        with self.app.app_context():
+            self.assertTrue(check_password_hash(db.session.get(User, six_id).password_hash, 'New456'))
+        self.assertIn(b'minlength="6"', self.client.get('/account/password').data)
+        self.client.post('/account/password', data={
+            'csrf_token': self.csrf(), 'current_password': 'Admin@2026',
+            'new_password': 'Adm123',
+        })
+        with self.app.app_context():
+            admin = User.query.filter_by(username='admin').one()
+            self.assertTrue(check_password_hash(admin.password_hash, 'Adm123'))
+
     def test_delete_excludes_entry_adjustments_and_retains_audit(self):
         self.login()
         with self.app.app_context():
@@ -265,6 +505,77 @@ class FinanceAppTests(unittest.TestCase):
             'group_name':'Taxes received','year':'2024','month_number':'2','subtotal':'100'})
         with self.app.app_context():
             self.assertEqual(Transaction.query.count(),0)
+
+    def test_group_type_code_prefix_uniqueness_and_numeric_order(self):
+        self.login()
+        page = self.client.get('/groups').data
+        self.assertIn(b'id="groupCreateForm"', page)
+        self.assertIn(b'value="IG_0"', page)
+        self.assertIn(b'id="groupEditForm"', self.client.get('/groups/IG_100/edit').data)
+        self.assertIn(b'name="kind"', self.client.get('/groups/IG_100/edit').data)
+
+        self.client.post('/groups', data={'csrf_token': self.csrf(), 'kind': 'income',
+            'name': 'Between group codes', 'code': 'IG_0011'})
+        with self.app.app_context():
+            added = Group.query.filter_by(name='Between group codes').one()
+            added_id = added.id
+            self.assertEqual(group_codes()[added_id], 11)
+            ordered = [group_codes()[group.id] for group in sorted_groups(Group.query.filter_by(kind='income').all())]
+            self.assertLess(ordered.index(10), ordered.index(11))
+            self.assertLess(ordered.index(11), ordered.index(20))
+        self.client.post('/groups', data={'csrf_token': self.csrf(), 'kind': 'income',
+            'name': 'Duplicate code', 'code': 'IG_0011'})
+        with self.app.app_context():
+            self.assertIsNone(Group.query.filter_by(name='Duplicate code').first())
+        self.client.post(f'/groups/{added_id}/toggle', data={'csrf_token': self.csrf()})
+        self.client.post('/groups', data={'csrf_token': self.csrf(), 'kind': 'income',
+            'name': 'Hidden duplicate code', 'code': 'IG_0011'})
+        with self.app.app_context():
+            self.assertIsNone(Group.query.filter_by(name='Hidden duplicate code').first())
+
+        self.client.post('/groups', data={'csrf_token': self.csrf(), 'kind': 'income',
+            'name': 'Automatic prefix group', 'code': 'IG_0'})
+        with self.app.app_context():
+            automatic = Group.query.filter_by(name='Automatic prefix group').one()
+            automatic_id = automatic.id
+            self.assertEqual(group_codes()[automatic_id], 60)
+        response = self.client.post(f'/groups/{automatic_id}/edit', data={
+            'csrf_token': self.csrf(), 'kind': 'expense', 'name': 'Moved empty group',
+            'code': 'EG_0071'})
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            moved = db.session.get(Group, automatic_id)
+            self.assertEqual((moved.kind, moved.name, group_codes()[automatic_id]),
+                             ('expense', 'Moved empty group', 71))
+        response = self.client.post('/groups/IG_100/edit', data={
+            'csrf_token': self.csrf(), 'kind': 'expense', 'name': 'Trade Income',
+            'code': 'EG_0072'}, follow_redirects=True)
+        self.assertIn(b'Move this group', response.data)
+        with self.app.app_context():
+            self.assertEqual(db.session.get(Group, 'IG_100').kind, 'income')
+
+    def test_particular_code_prefix_auto_assigns_next_for_each_type(self):
+        self.login()
+        page = self.client.get('/categories').data
+        self.assertIn(b'id="categoryCreateForm"', page)
+        self.assertIn(b'value="IP_0"', page)
+        with self.app.app_context():
+            previous = {
+                kind: max(particular_codes()[item.id] for item in Category.query.filter_by(kind=kind).all())
+                for kind in ('income', 'expense')
+            }
+        for kind, group_name, prefix in (
+            ('income', 'Trade Income', 'IP'),
+            ('expense', 'Operational Expenditure', 'EP'),
+        ):
+            response = self.client.post('/categories', data={
+                'csrf_token': self.csrf(), 'kind': kind, 'group_name': group_name,
+                'code': prefix + '_0', 'name': 'Automatic ' + kind + ' code',
+            })
+            self.assertEqual(response.status_code, 302)
+            with self.app.app_context():
+                item = Category.query.filter_by(name='Automatic ' + kind + ' code').one()
+                self.assertEqual(particular_codes()[item.id], previous[kind] + 100)
 
     def test_edit_absolute_total_with_history_and_stale_form_protection(self):
         self.login()

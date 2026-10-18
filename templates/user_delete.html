@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Delete user · K.Y.S. Finance{% endblock %}
+{% block page_title %}Delete user{% endblock %}
+{% block content %}
+<nav class="hero-row compact" aria-label="Page navigation"><a class="btn secondary" href="{{ url_for('users') }}">&larr; Back to users</a></nav>
+<section class="hero-row compact"><div><span class="eyebrow">Administrator action</span><h1>Delete this account?</h1><p>The user will lose access immediately. Existing ledger entries and audit history will still show who made them.</p></div></section>
+<article class="card form-card centered small">
+  <h2>{{ edit_user.display_name }}</h2>
+  <p class="muted">Username: <strong>{{ edit_user.username }}</strong> · {{ ROLES[edit_user.role] }}</p>
+  <p class="muted">Deleted usernames are reserved to protect historical records. To temporarily remove access instead, use Disable.</p>
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="confirmed" value="yes">
+    <div class="form-actions"><a class="btn secondary" href="{{ url_for('users') }}">Cancel</a><button class="btn confirm-danger" type="submit">Yes, delete user</button></div>
+  </form>
+</article>
+{% endblock %}

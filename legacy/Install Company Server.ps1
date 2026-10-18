@@ -1,35 +1,20 @@
+param([switch]$AccountConfigured)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $exe = Join-Path $root 'KYS Finance Server.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Extract the entire package first.' }
 if ((Test-Path -LiteralPath (Join-Path $root 'data\kys_finance.db')) -and -not (Test-Path -LiteralPath (Join-Path $root 'company-installation.txt'))) { throw 'An unrecognized database exists here. Do not overwrite or migrate live data with this installer. Use a clean folder.' }
-$shell = New-Object -ComObject WScript.Shell
-$restoreLink = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Restore KYS Backup.lnk'))
-if ((Test-Path -LiteralPath (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Restore KYS Backup.lnk')) -and $restoreLink.TargetPath -ine $exe) { throw 'Restore shortcut belongs to another installation.' }
-$arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $root 'Start Company Server.ps1') + '"'
-foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Startup'))) {
-    $path = Join-Path $folder 'KYS Finance Server.lnk'
-    if ((Test-Path -LiteralPath $path) -and $shell.CreateShortcut($path).Arguments -cne $arguments) { throw 'A shortcut points to another installation. Stop and inspect it before continuing.' }
-}
 Set-Content -LiteralPath (Join-Path $root 'company-installation.txt') -Value 'Company package; configure in place; preserve data.'
-& $exe --configure-admin
+if ($AccountConfigured) { & $exe --check-admin } else { & $exe --configure-admin }
 if ($LASTEXITCODE -ne 0) { throw 'Administrator configuration or runtime check failed. On Windows 7 install the prerequisites in COMPANY-INSTALL.md and restart.' }
 & (Join-Path $root 'Enable Company Network.ps1')
 Set-Content -LiteralPath (Join-Path $root 'setup-complete.txt') -Value 'Configured'
-$restoreLink.TargetPath = $exe
-$restoreLink.Arguments = '--restore'
-$restoreLink.WorkingDirectory = $root
-$restoreLink.Save()
-foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Startup'))) {
-    $link = $shell.CreateShortcut((Join-Path $folder 'KYS Finance Server.lnk'))
-    $link.TargetPath = Join-Path $PSHOME 'powershell.exe'
-    $link.Arguments = $arguments
-    $link.WorkingDirectory = $root
-    $link.WindowStyle = 7
-    $link.Save()
-}
-Set-Content -LiteralPath (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Open KYS Finance.url') -Encoding ASCII -Value @('[InternetShortcut]','URL=http://127.0.0.1:5000/')
+& (Join-Path $root 'Create Company Shortcuts.ps1') -InstallDirectory $root
+if (-not $?) { throw 'Shared Desktop and Startup shortcut creation failed.' }
+& (Join-Path $root 'Configure Company Auto Start.ps1')
+if (-not $?) { throw 'Sign-in auto-start setup failed.' }
 & (Join-Path $root 'Start Company Server.ps1')
+if (-not $?) { throw 'Server startup failed.' }
 $ready = $false
 for ($i=0; $i -lt 30; $i++) {
     try {

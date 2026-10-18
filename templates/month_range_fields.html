@@ -1,0 +1,7 @@
+{% set months = [(1,'January'),(2,'February'),(3,'March'),(4,'April'),(5,'May'),(6,'June'),(7,'July'),(8,'August'),(9,'September'),(10,'October'),(11,'November'),(12,'December')] %}
+{% set is_range = (start.year, start.month) != (end.year, end.month) %}
+<label>Period<select id="periodMode" name="period_mode"><option value="one" {{ 'selected' if not is_range }}>One month</option><option value="range" {{ 'selected' if is_range }}>Month range</option></select></label>
+{% for prefix, value, label in [('from', start, 'From'), ('to', end, 'To')] %}
+<label {% if prefix == 'to' %}data-range-field{% endif %}>{{ label }} month<select name="{{ prefix }}_month">{% for n, name in months %}<option value="{{ n }}" {{ 'selected' if value.month == n }}>{{ name }}</option>{% endfor %}</select></label>
+<label {% if prefix == 'to' %}data-range-field{% endif %}>{{ label }} year<select name="{{ prefix }}_year">{% for y in range([today.year-20, start.year]|min, [today.year+6, end.year+1]|max) %}<option value="{{ y }}" {{ 'selected' if value.year == y }}>{{ y }}</option>{% endfor %}</select></label>
+{% endfor %}

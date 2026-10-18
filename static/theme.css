@@ -11,6 +11,9 @@
 .confirm-actions { display: flex; gap: 12px; margin-top: 24px; }
 .confirm-actions .btn { flex: 1; justify-content: center; }
 .btn.confirm-danger { background: var(--red); color: var(--white); border: 1px solid var(--red); box-shadow: none; }
+.user-actions { flex-wrap: wrap; gap: 8px; }
+.user-actions .btn { min-height: 36px; padding: 7px 12px; white-space: nowrap; }
+.btn.user-delete-action { border: 1px solid var(--red); background: var(--white); color: var(--red); }
 .confirm-dialog button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .confirm-dialog button:disabled { opacity: .65; cursor: wait; }
 @media (max-width: 480px) { .confirm-overlay { padding: 16px; } .confirm-dialog { padding: 24px; } .confirm-actions { flex-direction: column; } }
@@ -98,6 +101,21 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .month-link:hover, .month-link:focus { background: rgba(var(--accent-rgb), .09); }
 .month-link:focus { outline: 2px solid var(--green); outline-offset: 3px; }
 .month-link span { padding: 3px 0; text-decoration: underline; text-underline-offset: 3px; }
+.account-table table { min-width: 810px; }
+.groups-grid { max-width: 1180px; grid-template-columns: minmax(280px, .8fr) minmax(580px, 1.2fr); }
+.groups-grid > * { min-width: 0; }
+.group-table table { min-width: 570px; }
+.account-actions { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.account-actions form { margin: 0; }
+.account-action { display: inline-flex; min-width: 64px; min-height: 36px; align-items: center; justify-content: center; padding: 6px 11px; border: 1px solid var(--accent); border-radius: 8px; background: var(--white); color: var(--accent); font: 700 .78rem Manrope, sans-serif; cursor: pointer; text-decoration: none; }
+.account-action:hover { background: var(--mint); }
+.account-action:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.account-action-hide { border-color: var(--red); background: var(--red-bg); color: var(--red); }
+.account-action-hide:hover { background: #e8d6d2; }
+.account-action-enable { border-color: #376b58; background: #e3efe9; color: #285b47; }
+.account-action-enable:hover { background: #d0e6d9; }
+.account-action-hide:focus-visible { outline-color: var(--red); }
+.account-action-enable:focus-visible { outline-color: #285b47; }
 .month-link:hover span, .month-link:focus span { color: var(--ink); font-weight: 700; }
 .month-link[aria-current="date"] { background: var(--surface-selected); box-shadow: inset 0 -3px 0 var(--accent); }
 .month-link[aria-current="date"] span { color: var(--ink); font-weight: 700; }
@@ -105,6 +123,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .ledger-actions .btn { min-height: 40px; padding: 9px 14px; font-size: .8rem; white-space: nowrap; }
 .ledger-actions .delete-action { color: var(--red); border-color: var(--red); }
 .ledger-actions .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 1350px) { .groups-grid { max-width: 740px; grid-template-columns: 1fr; } }
 
 @media (max-width: 850px) {
   .login-shell { grid-template-columns: 1fr; }

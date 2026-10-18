@@ -1,7 +1,9 @@
 import contextlib
+from contextlib import closing
 import io
 import os
 import runpy
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,31 @@ import app as finance
 
 
 class CompanySetupTests(unittest.TestCase):
+    def test_existing_company_accounts_gain_deleted_flag_without_losing_passwords(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(finance, 'DATA_ROOT', Path(folder)), patch.dict(os.environ, {'KYS_COMPANY_MODE': '1', 'KYS_DISABLE_BACKUP': '1'}):
+            db_path = Path(folder) / 'company.db'
+            config = {'TESTING': True, 'SQLALCHEMY_DATABASE_URI': 'sqlite:///' + db_path.as_posix()}
+            app = finance.create_app(config)
+            with app.app_context():
+                account = finance.User(username='owner', display_name='Owner', department='Finance', role='admin')
+                account.set_password('Secret123')
+                finance.db.session.add(account)
+                finance.db.session.commit()
+                finance.db.session.remove()
+                finance.db.engine.dispose()
+            with closing(sqlite3.connect(str(db_path))) as connection:
+                connection.execute('ALTER TABLE user DROP COLUMN deleted')
+                connection.commit()
+            restored = finance.create_app(config)
+            self.assertEqual(len(list((Path(folder) / 'backups').glob('pre-user-migration-*.db'))), 1)
+            with restored.app_context():
+                account = finance.User.query.filter_by(username='owner').one()
+                self.assertFalse(account.deleted)
+                self.assertTrue(finance.check_password_hash(account.password_hash, 'Secret123'))
+                self.assertEqual(finance.User.query.count(), 1)
+                finance.db.session.remove()
+                finance.db.engine.dispose()
+
     def test_company_bootstrap_requires_private_admin_and_no_demo_accounts(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(finance, 'DATA_ROOT', Path(folder)), patch.dict(os.environ, {'KYS_COMPANY_MODE': '1', 'KYS_DISABLE_BACKUP': '1'}):
             app = finance.create_app({'TESTING': True, 'SQLALCHEMY_DATABASE_URI': 'sqlite:///:memory:'})

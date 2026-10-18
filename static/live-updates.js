@@ -9,6 +9,13 @@ document.addEventListener('DOMContentLoaded', () => {
   let busy = false;
   let stopped = false;
   let submitting = false;
+  let etag = '';
+  let failures = 0;
+  let timer;
+  const schedule = () => {
+    clearTimeout(timer);
+    if (!stopped) timer = setTimeout(poll, Math.min(60000, 5000 * Math.pow(2, failures)) + Math.random() * 1000);
+  };
   const reload = () => {
     try {
       sessionStorage.setItem(storageKey, JSON.stringify({scroll: window.scrollY,
@@ -29,16 +36,29 @@ document.addEventListener('DOMContentLoaded', () => {
     form.addEventListener('change', () => { dirty = true; });
   });
   document.addEventListener('submit', () => { submitting = true; });
-  refresh.addEventListener('click', reload);
+  refresh.addEventListener('click', () => {
+    if (dirty) {
+      status.textContent = 'Unsaved selections are present. Apply or reset them before refreshing.';
+      return;
+    }
+    reload();
+  });
   const unsafeToReload = () => dirty || submitting || document.body.classList.contains('confirmation-open') ||
     (document.activeElement && document.activeElement.matches('input, select, textarea'));
   const poll = async () => {
-    if (busy || stopped || document.hidden) return;
+    if (busy || stopped) return;
+    if (document.hidden) { schedule(); return; }
     busy = true;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
-      const response = await fetch(panel.dataset.url, {credentials: 'same-origin', cache: 'no-store', signal: controller.signal});
+      const response = await fetch(panel.dataset.url, {credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+        headers: etag ? {'If-None-Match': etag} : {}});
+      if (response.status === 304) {
+        failures = 0;
+        if (pending && !unsafeToReload()) reload();
+        return;
+      }
       if (response.status === 401) {
         stopped = true;
         status.textContent = 'Session ended. Reload to sign in.';
@@ -48,18 +68,22 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!response.ok || response.redirected) throw new Error('Unavailable');
       const data = await response.json();
       if (typeof data.version !== 'string') throw new Error('Invalid response');
+      etag = response.headers.get('ETag') || '';
+      failures = 0;
       pending = data.version !== panel.dataset.version;
       if (pending && !unsafeToReload()) { reload(); return; }
       status.textContent = pending ? 'New data available. Finish your selection or show latest data.' : 'Auto-update on · checks every 5 seconds';
       refresh.hidden = !pending;
     } catch (_) {
+      failures = Math.min(failures + 1, 4);
       status.textContent = 'Connection interrupted · retrying automatically';
     } finally {
       clearTimeout(timeout);
       busy = false;
+      schedule();
     }
   };
-  setInterval(poll, 5000);
+  schedule();
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
   window.addEventListener('online', poll);
 });

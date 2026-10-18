@@ -36,7 +36,7 @@
       <button class="menu-btn" id="menuButton" type="button" aria-label="Open navigation">☰</button>
       <div><span class="eyebrow">Cash-based accounting</span><strong>{% block page_title %}Overview{% endblock %}</strong></div>
       <div class="top-actions">
-        <a class="icon-link" href="{{ url_for('change_password') }}" title="Change password">⚙</a>
+        {% if current_user.role == 'admin' %}<a class="icon-link" href="{{ url_for('change_password') }}" title="Change password">⚙</a>{% endif %}
         <form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">Sign out</button></form>
       </div>
     </header>

@@ -1,3 +1,13 @@
-{% extends 'base.html' %}{% block page_title %}Edit group{% endblock %}{% block content %}
-<h1>Edit {{ item.kind }} group</h1><form method="post" class="card form-card single"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Group name<input name="name" value="{{ request.form.get('name', item.name) }}" required maxlength="100"></label><label>Group code<input name="code" type="text" maxlength="20" value="{{ request.form.get('code', group_labels[item.id]) }}" required></label><button class="btn primary">Save changes</button><a href="{{ url_for('groups') }}" class="btn secondary">Cancel</a></form>
+{% extends 'base.html' %}
+{% block title %}Edit group · K.Y.S. Finance{% endblock %}
+{% block page_title %}Edit group{% endblock %}
+{% block content %}
+<section class="hero-row compact"><div><span class="eyebrow">Administrator action</span><h1>Edit group</h1><p>Update the type, name and code. To change a group's type, first move its particulars to other groups so existing entries remain correctly classified.</p></div></section>
+<form id="groupEditForm" method="post" class="card form-card single centered">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Type<select name="kind" required><option value="income" {{ 'selected' if request.form.get('kind', item.kind) == 'income' }}>Income</option><option value="expense" {{ 'selected' if request.form.get('kind', item.kind) == 'expense' }}>Expenditure</option></select></label>
+  <label>Group name<input name="name" value="{{ request.form.get('name', item.name) }}" required maxlength="100"></label>
+  <label>Group code<input name="code" type="text" maxlength="20" value="{{ request.form.get('code', group_labels[item.id]) }}" required autocomplete="off"><small>Codes must be unique within the selected type. Hidden groups keep their codes.</small></label>
+  <div class="form-actions"><a href="{{ url_for('groups') }}" class="btn secondary">Cancel</a><button class="btn primary" type="submit">Save changes</button></div>
+</form>
 {% endblock %}

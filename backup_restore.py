@@ -16,6 +16,32 @@ def connect_readonly(path):
     return sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)
 
 
+def migrate_staged_backup(staged, current):
+    """Only upgrade the known pre-user-delete schema, never the source backup."""
+    with closing(connect_readonly(staged)) as source, closing(connect_readonly(current)) as target:
+        if source.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise ValueError('Backup integrity check failed.')
+        tables = [r[0] for r in target.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        needs_deleted = False
+        for table in tables:
+            quoted = '"' + table.replace('"', '""') + '"'
+            expected = [(r[1], r[2], r[5]) for r in target.execute('PRAGMA table_info(' + quoted + ')')]
+            actual = [(r[1], r[2], r[5]) for r in source.execute('PRAGMA table_info(' + quoted + ')')]
+            if actual == expected:
+                continue
+            if table == 'user' and actual == [r for r in expected if r[0] != 'deleted'] and any(r[0] == 'deleted' for r in expected):
+                needs_deleted = True
+            else:
+                raise ValueError('Unsupported backup version. No live data was changed.')
+        if source.execute("SELECT name FROM sqlite_master WHERE type IN ('trigger','view')").fetchone():
+            raise ValueError('Unsupported database objects.')
+    if needs_deleted:
+        with closing(sqlite3.connect(str(staged))) as connection:
+            with connection:
+                connection.execute('ALTER TABLE user ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT 0')
+    return inspect_backup(staged, current)
+
+
 def inspect_backup(path, current):
     with closing(connect_readonly(path)) as source, closing(connect_readonly(current)) as target:
         if source.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
@@ -31,7 +57,8 @@ def inspect_backup(path, current):
             actual = [(row[1], row[2], row[5]) for row in source.execute('PRAGMA table_info(' + quoted + ')')]
             if expected != actual:
                 raise ValueError('This backup uses a different database version. It needs a version migration before restore.')
-        admins = source.execute("SELECT COUNT(*) FROM user WHERE role='admin' AND active=1").fetchone()[0]
+        columns = {r[1] for r in source.execute('PRAGMA table_info(user)')}
+        admins = source.execute("SELECT COUNT(*) FROM user WHERE role='admin' AND active=1" + (' AND deleted=0' if 'deleted' in columns else '')).fetchone()[0]
         if not admins:
             raise ValueError('This backup has no active administrator account.')
         count, latest = source.execute('SELECT COUNT(*), MAX(cash_date) FROM "transaction"').fetchone()
@@ -40,7 +67,8 @@ def inspect_backup(path, current):
 
 def authenticate(path, username, password):
     with closing(connect_readonly(path)) as connection:
-        row = connection.execute("SELECT password_hash FROM user WHERE lower(username)=lower(?) AND role='admin' AND active=1", (username,)).fetchone()
+        columns = {r[1] for r in connection.execute('PRAGMA table_info(user)')}
+        row = connection.execute("SELECT password_hash FROM user WHERE lower(username)=lower(?) AND role='admin' AND active=1" + (' AND deleted=0' if 'deleted' in columns else ''), (username,)).fetchone()
         return bool(row and check_password_hash(row[0], password))
 
 
@@ -59,6 +87,8 @@ def restore_database(staged, root):
     if secret.exists():
         shutil.copy2(secret, recovery / '.secret_key')
     try:
+        if os.environ.get('KYS_SECRET_KEY'):
+            raise ValueError('An environment session secret is configured. Restore requires a controlled secret rotation; contact the administrator. No data changed.')
         with closing(connect_readonly(staged)) as source, closing(sqlite3.connect(str(live))) as target:
             source.backup(target)
             if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
@@ -107,7 +137,7 @@ def wizard(root):
             staged = Path(temporary) / 'selected.db'
             with closing(connect_readonly(chosen)) as source, closing(sqlite3.connect(str(staged))) as destination:
                 source.backup(destination)
-            count, latest = inspect_backup(staged, live)
+            count, latest = migrate_staged_backup(staged, live)
             if not messagebox.askyesno('Confirm restore',
                     'Backup: {}\nTransactions: {}\nLatest transaction: {}\n\n'
                     'This REPLACES current data and user accounts; it does not merge them. '

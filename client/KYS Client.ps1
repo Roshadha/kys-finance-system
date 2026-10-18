@@ -25,6 +25,7 @@ function New-KysShortcut([string]$ShortcutDirectory = [Environment]::GetFolderPa
     $link.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $script:ClientDirectory 'KYS Client.ps1') + '"'
     $link.WorkingDirectory = $script:ClientDirectory
     $link.Description = 'Find the KYS Finance server on the company network and open it'
+    $link.IconLocation = Join-Path $script:ClientDirectory 'kys-finance-pl.ico'
     $link.Save()
 }
 
