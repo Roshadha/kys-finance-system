@@ -4,31 +4,144 @@ from datetime import date
 from unittest.mock import patch
 from html import unescape
 import re
+from pathlib import Path
 from werkzeug.security import check_password_hash
 
 os.environ["KYS_DISABLE_BACKUP"] = "1"
 
-from app import Adjustment, Category, Transaction, User, Group, AuditLog, build_report, group_codes, particular_codes, sorted_groups, sorted_categories, seed_database, create_app, db
+from app import Adjustment, Category, Transaction, User, Group, AuditLog, build_report, group_codes, particular_codes, sorted_groups, sorted_categories, seed_database, create_app, db, account_catalog_plan
+from account_catalog import GROUPS as CATALOG_GROUPS, PARTICULARS as CATALOG_PARTICULARS
 
 
 class FinanceAppTests(unittest.TestCase):
-    def test_closed_month_blocks_edit_delete_and_reopen_restores_access(self):
+    def test_rearranged_catalog_seeds_exact_codes_and_preserves_entries(self):
+        self.login()
+        with self.app.app_context():
+            self.assertEqual(Group.query.count(), len(CATALOG_GROUPS))
+            self.assertEqual(Category.query.count(), len(CATALOG_PARTICULARS))
+            self.assertFalse(account_catalog_plan()['changes'])
+            income = Category.query.filter_by(name='Security Service Income').one()
+            income_id = income.id
+            self.assertEqual(particular_codes()[income_id], 100)
+            self.assertEqual(Category.query.filter_by(name='Security Service Inward SSCL').count(), 1)
+            user_id = User.query.filter_by(username='admin').one().id
+            db.session.add(Transaction(cash_date=date(2026, 4, 5), category_id=income_id,
+                created_by_id=user_id, reference='APR-KEEP', counterparty='', subtotal=125, total=125))
+            db.session.commit()
+            income.name = 'Old Security Service Income'
+            db.session.add(AuditLog(action='account_code', entity_type='category',
+                entity_id=income_id, details='2700'))
+            db.session.commit()
+            # An explicitly reviewed alias maps the same internal account back
+            # to the revised chart, keeping April transaction links intact.
+            income.name = 'Security Service Income'
+            db.session.commit()
+            plan = account_catalog_plan()
+            self.assertTrue(any('IP_2700' in change for change in plan['changes']))
+            fingerprint = plan['fingerprint']
+        with patch('app.make_backup', return_value=(Path('verified-backup.db'), None, None)):
+            response = self.client.post('/accounts/rearrange', data={
+                'csrf_token': self.csrf(), 'fingerprint': fingerprint, 'confirmed': 'yes'})
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(particular_codes()[income_id], 100)
+            entry = Transaction.query.filter_by(reference='APR-KEEP').one()
+            self.assertEqual((entry.category_id, entry.total), (income_id, 125))
+
+    def test_catalog_preview_blocks_unmapped_posted_account(self):
+        self.login()
+        with self.app.app_context():
+            group = Group.query.filter_by(kind='income').first()
+            legacy = Category(kind='income', group_id=group.id, group_name=group.name,
+                              name='Unmapped posted income')
+            db.session.add(legacy)
+            db.session.flush()
+            db.session.add(Transaction(cash_date=date(2026, 4, 7), category_id=legacy.id,
+                created_by_id=User.query.filter_by(username='admin').one().id,
+                reference='UNMAPPED', counterparty='', subtotal=1, total=1))
+            db.session.commit()
+            self.assertTrue(any('manual mapping' in message for message in account_catalog_plan()['blocked']))
+        page = self.client.get('/accounts/rearrange')
+        self.assertIn(b'Manual mapping required', page.data)
+        self.assertNotIn(b'Back up and apply account chart', page.data)
+
+    def test_catalog_restates_april_report_without_reentering_transaction(self):
+        self.login()
+        with self.app.app_context():
+            item = Category.query.filter_by(kind='expense', name='Cleaning Items, Materials & Equipment Expenditure').one()
+            item_id = item.id
+            item.name = 'Cleaning Items & Materials Expenditure'
+            db.session.add(AuditLog(action='account_code', entity_type='category',
+                                    entity_id=item_id, details='2700'))
+            db.session.add(Transaction(cash_date=date(2026, 4, 8), category_id=item_id,
+                created_by_id=User.query.filter_by(username='admin').one().id,
+                reference='APR-CATALOG', counterparty='', subtotal=270, total=270))
+            db.session.commit()
+            plan = account_catalog_plan()
+            self.assertFalse(plan['blocked'])
+            fingerprint = plan['fingerprint']
+        with patch('app.make_backup', return_value=(Path('verified-backup.db'), None, None)):
+            response = self.client.post('/accounts/rearrange', data={
+                'csrf_token': self.csrf(), 'fingerprint': fingerprint, 'confirmed': 'yes'})
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(Transaction.query.filter_by(reference='APR-CATALOG').one().category_id, item_id)
+            self.assertEqual(particular_codes()[item_id], 1700)
+            report = build_report(date(2026, 4, 1), date(2026, 4, 30))
+            row = next(row for row in report['rows'] if row['Reference'] == 'APR-CATALOG')
+            self.assertEqual((row['Particular'], row['Account Code'], row['Cash Total']),
+                             ('Cleaning Items, Materials & Equipment Expenditure', 'EP_1700', 270))
+            self.assertEqual(account_catalog_plan()['changes'], [])
+
+    def test_unused_account_can_be_deleted_but_posted_account_cannot(self):
+        self.login()
+        with self.app.app_context():
+            group = Group.query.filter_by(kind='income', name='Trade Income').one()
+            posted = Category.query.filter_by(kind='income', name='Security Service Income').one()
+            unused = Category(kind='income', group_id=group.id, group_name=group.name,
+                              name='Temporary unused account')
+            db.session.add(unused)
+            db.session.add(Transaction(cash_date=date(2026, 4, 9), category_id=posted.id,
+                created_by_id=User.query.filter_by(username='admin').one().id,
+                reference='KEEP-POSTED', counterparty='', subtotal=5, total=5))
+            db.session.commit()
+            posted_id, unused_id, group_id = posted.id, unused.id, group.id
+        for identifier in (posted_id, unused_id):
+            self.assertEqual(self.client.post(f'/categories/{identifier}/delete',
+                data={'csrf_token': self.csrf()}).status_code, 302)
+        self.assertEqual(self.client.post(f'/groups/{group_id}/delete',
+            data={'csrf_token': self.csrf()}).status_code, 302)
+        with self.app.app_context():
+            self.assertIsNotNone(db.session.get(Category, posted_id))
+            self.assertIsNone(db.session.get(Category, unused_id))
+            self.assertIsNotNone(db.session.get(Group, group_id))
+
+    def test_month_close_option_removed_and_old_closure_no_longer_blocks_entries(self):
         self.login()
         with self.app.app_context():
             item = Transaction(cash_date=date(2026, 1, 1), category_id=Category.query.first().id,
                 created_by_id=User.query.filter_by(username='admin').one().id,
                 reference='lock', counterparty='', subtotal=100, total=100)
             db.session.add(item)
+            db.session.add(AuditLog(action='period_close', entity_type='period',
+                entity_id='2026-01', details='Legacy closure'))
             db.session.commit()
             identifier = item.id
-        fields = {'csrf_token': self.csrf(), 'year': '2026', 'month_number': '1', 'action': 'close', 'reason': 'Month approved'}
-        self.assertEqual(self.client.post('/reports/period-status', data=fields).status_code, 302)
-        for suffix in ('edit', 'delete', 'adjust'):
-            self.assertEqual(self.client.post('/transactions/{}/{}'.format(identifier, suffix), data={'csrf_token': self.csrf(), 'confirmed': 'yes'}).status_code, 409)
-        fields['action'] = 'open'
-        fields['reason'] = 'Approved correction'
-        self.assertEqual(self.client.post('/reports/period-status', data=fields).status_code, 302)
-        self.assertEqual(self.client.post('/transactions/{}/delete'.format(identifier), data={'csrf_token': self.csrf(), 'confirmed': 'yes'}).status_code, 302)
+        report = self.client.get('/reports?year=2026&month_number=1')
+        self.assertEqual(report.status_code, 200)
+        self.assertNotIn(b'Close month', report.data)
+        self.assertNotIn(b'Reopen month', report.data)
+        self.assertEqual(self.client.post('/reports/period-status', data={
+            'csrf_token': self.csrf(), 'year': '2026', 'month_number': '1',
+            'action': 'close', 'reason': 'No longer offered',
+        }).status_code, 404)
+        self.assertEqual(self.client.post(f'/transactions/{identifier}/edit', data={
+            'csrf_token': self.csrf(), 'version': '0', 'total': '125',
+            'reason': 'Correct old entry',
+        }).status_code, 302)
+        self.assertEqual(self.client.post(f'/transactions/{identifier}/delete', data={
+            'csrf_token': self.csrf(), 'confirmed': 'yes',
+        }).status_code, 302)
 
     def test_login_throttle_and_old_sessions_revoked(self):
         self.client.get('/login')
@@ -489,16 +602,17 @@ class FinanceAppTests(unittest.TestCase):
     def test_group_code_rename_hide_and_tax_identity(self):
         self.login()
         with self.app.app_context():
-            tax = Category.query.filter_by(kind='income', name='SSCL').one()
-            self.assertEqual(tax.id, 'IP_0190')
-            self.assertEqual(Category.query.filter_by(kind='income', name='VAT').one().id, 'IP_0200')
+            tax = Category.query.filter_by(kind='income', name='Security Service Inward SSCL').one()
+            self.assertEqual(particular_codes()[tax.id], 2500)
+            vat = Category.query.filter_by(kind='income', name='Security Service Inward VAT').one()
+            self.assertEqual(particular_codes()[vat.id], 2000)
             gid, cid = tax.group_id, tax.id
         self.client.post(f'/groups/{gid}/edit', data={'csrf_token':self.csrf(), 'name':'Taxes received', 'code':'50'})
         with self.app.app_context():
             self.assertEqual(group_codes()[gid], 50)
             self.assertEqual(db.session.get(Category,cid).group_name, 'Taxes received')
             seed_database()
-            self.assertEqual(Category.query.filter_by(kind='income',name='SSCL').count(),1)
+            self.assertEqual(Category.query.filter_by(kind='income',name='Security Service Inward SSCL').count(),1)
         self.client.post(f'/groups/{gid}/toggle', data={'csrf_token':self.csrf()})
         self.assertNotIn(cid.encode(), self.client.get('/transactions/new?kind=income').data)
         self.client.post('/transactions/new?kind=income', data={'csrf_token':self.csrf(), 'category_id':cid,
@@ -661,6 +775,146 @@ class FinanceAppTests(unittest.TestCase):
         self.assertEqual(self.client.get("/transactions/new?kind=income").status_code, 200)
         self.assertEqual(self.client.get("/transactions/new?kind=expense").status_code, 403)
         self.assertEqual(self.client.get("/reports").status_code, 403)
+
+    def test_delegated_delete_task_can_remove_any_entry_but_not_edit(self):
+        self.login()
+        with self.app.app_context():
+            staff = User.query.filter_by(username='recovery').one()
+            admin = User.query.filter_by(username='admin').one()
+            category = Category.query.filter_by(name='Security Service Income').one()
+            staff_id = staff.id
+            entry = Transaction(category_id=category.id, cash_date=date(2026, 2, 1),
+                reference='ADMIN-ENTRY', counterparty='', subtotal=75, total=75,
+                created_by_id=admin.id)
+            db.session.add(entry)
+            db.session.commit()
+            entry_id = entry.id
+        self.login('recovery', 'KysRec@2026')
+        path = f'/transactions/{entry_id}/delete'
+        self.assertEqual(self.client.get(path).status_code, 403)
+        self.assertEqual(self.client.post(path, data={'csrf_token': self.csrf(), 'confirmed': 'yes'}).status_code, 403)
+        self.assertNotIn(b'ADMIN-ENTRY', self.client.get('/transactions?year=2026&month_number=2').data)
+
+        self.login()
+        form = self.client.get(f'/users/{staff_id}/edit')
+        self.assertIn(b'value="delete_entries"', form.data)
+        response = self.client.post(f'/users/{staff_id}/edit', data={
+            'csrf_token': self.csrf(), 'username': 'recovery', 'display_name': 'Recovery Department',
+            'role': 'data_entry', 'active': 'yes', 'tasks': ['income_entry', 'delete_entries'],
+        })
+        self.assertEqual(response.status_code, 302)
+        self.login('recovery', 'KysRec@2026')
+        ledger = self.client.get('/transactions?year=2026&month_number=2')
+        self.assertIn(b'ADMIN-ENTRY', ledger.data)
+        self.assertIn(b'Delete entry', ledger.data)
+        self.assertNotIn(b'Edit entry', ledger.data)
+        self.assertEqual(self.client.get('/reports').status_code, 403)
+        self.assertEqual(self.client.get(f'/transactions/{entry_id}/edit').status_code, 403)
+        self.assertEqual(self.client.get(path).status_code, 200)
+        self.assertEqual(self.client.post(path, data={'csrf_token': self.csrf(), 'confirmed': 'yes'}).status_code, 302)
+        with self.app.app_context():
+            log = AuditLog.query.filter_by(action='delete', entity_type='transaction', entity_id=str(entry_id)).one()
+            self.assertEqual(log.user_id, staff_id)
+            self.assertEqual(build_report(date(2026, 2, 1), date(2026, 2, 28))['income'], 0)
+
+    def test_delegated_edit_task_can_edit_any_entry_but_not_delete(self):
+        self.login()
+        with self.app.app_context():
+            staff = User.query.filter_by(username='recovery').one()
+            admin = User.query.filter_by(username='admin').one()
+            category = Category.query.filter_by(name='Security Service Income').one()
+            item = Transaction(category_id=category.id, cash_date=date(2026, 3, 1),
+                reference='ADMIN-EDIT', counterparty='', subtotal=100, total=100,
+                created_by_id=admin.id)
+            db.session.add(item)
+            db.session.commit()
+            staff_id, entry_id = staff.id, item.id
+        self.assertEqual(self.client.post(f'/users/{staff_id}/edit', data={
+            'csrf_token': self.csrf(), 'username': 'recovery', 'display_name': 'Recovery Department',
+            'role': 'data_entry', 'active': 'yes', 'tasks': ['edit_entries'],
+        }).status_code, 302)
+        self.login('recovery', 'KysRec@2026')
+        self.assertEqual(self.client.get('/').location, '/transactions')
+        ledger = self.client.get('/transactions?year=2026&month_number=3')
+        self.assertIn(b'ADMIN-EDIT', ledger.data)
+        self.assertIn(b'Edit entry', ledger.data)
+        self.assertNotIn(b'Delete entry', ledger.data)
+        self.assertNotIn(b'Select all', ledger.data)
+        page = self.client.get(f'/transactions/{entry_id}/edit')
+        self.assertEqual(page.status_code, 200)
+        version = re.search(rb'name="version" value="([^"]*)"', page.data).group(1).decode()
+        self.assertEqual(self.client.post(f'/transactions/{entry_id}/edit', data={
+            'csrf_token': self.csrf(), 'version': version, 'total': '125', 'reason': 'Correction',
+        }).status_code, 302)
+        self.assertEqual(self.client.get(f'/transactions/{entry_id}/delete').status_code, 403)
+        self.assertEqual(self.client.get('/reports').status_code, 403)
+        with self.app.app_context():
+            self.assertEqual(db.session.get(Transaction, entry_id).adjusted_total, 125)
+            self.assertEqual(AuditLog.query.filter_by(action='edit', entity_type='transaction',
+                entity_id=str(entry_id)).one().user_id, staff_id)
+
+    def test_bulk_delete_requires_permission_and_is_atomic(self):
+        self.login()
+        with self.app.app_context():
+            admin = User.query.filter_by(username='admin').one()
+            category = Category.query.filter_by(name='Security Service Income').one()
+            items = [Transaction(category_id=category.id, cash_date=date(2026, 4, 1),
+                reference=f'BULK-{number}', counterparty='', subtotal=number,
+                total=number, created_by_id=admin.id) for number in (10, 20)]
+            db.session.add_all(items)
+            db.session.commit()
+            ids = [item.id for item in items]
+        ledger = self.client.get('/transactions?year=2026&month_number=4')
+        self.assertIn(b'Select all', ledger.data)
+        self.assertIn(b'Delete selected', ledger.data)
+        path = '/transactions/delete-selected'
+        payload = {'csrf_token': self.csrf(), 'confirmed': 'yes',
+                   'transaction_ids': [str(identifier) for identifier in ids]}
+        self.assertEqual(self.client.post(path, data={**payload, 'transaction_ids': []}).status_code, 400)
+        self.assertEqual(self.client.post(path, data={**payload,
+            'transaction_ids': [str(ids[0]), str(ids[0])]}).status_code, 400)
+        self.assertEqual(self.client.post(path, data={**payload,
+            'transaction_ids': [str(ids[0]), '999999']}).status_code, 409)
+        with self.app.app_context():
+            self.assertEqual(AuditLog.query.filter_by(action='delete', entity_type='transaction').count(), 0)
+        self.assertEqual(self.client.post(path, data=payload).status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(AuditLog.query.filter_by(action='delete', entity_type='transaction').count(), 2)
+            self.assertEqual(build_report(date(2026, 4, 1), date(2026, 4, 30))['income'], 0)
+        self.assertEqual(self.client.post(path, data=payload).status_code, 409)
+        self.login('recovery', 'KysRec@2026')
+        self.assertEqual(self.client.post(path, data={**payload,
+            'csrf_token': self.csrf()}).status_code, 403)
+
+    def test_bulk_delete_requires_csrf_and_ignores_legacy_month_closure(self):
+        self.login()
+        with self.app.app_context():
+            admin = User.query.filter_by(username='admin').one()
+            category = Category.query.filter_by(name='Security Service Income').one()
+            item = Transaction(category_id=category.id, cash_date=date(2026, 5, 1),
+                reference='CLOSED-BULK', counterparty='', subtotal=50, total=50,
+                created_by_id=admin.id)
+            db.session.add(item)
+            db.session.add(AuditLog(action='period_close', entity_type='period',
+                entity_id='2026-05', details='Legacy closure'))
+            db.session.commit()
+            entry_id = item.id
+        path = '/transactions/delete-selected'
+        self.assertEqual(self.client.post(path, data={'confirmed': 'yes',
+            'transaction_ids': [str(entry_id)]}).status_code, 400)
+        self.assertEqual(self.client.post(path, data={'csrf_token': self.csrf(),
+            'confirmed': 'yes', 'transaction_ids': [str(entry_id)]}).status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(AuditLog.query.filter_by(action='delete', entity_type='transaction').count(), 1)
+
+    def test_theme_switch_appears_on_login_and_app_pages(self):
+        login_page = self.client.get('/login')
+        self.assertIn(b'id="themeSwitch"', login_page.data)
+        self.assertIn(b'theme-toggle.js', login_page.data)
+        self.login()
+        page = self.client.get('/transactions')
+        self.assertIn(b'id="themeSwitch"', page.data)
+        self.assertIn(b'light-dark-20261019', page.data)
 
     def test_group_account_selection_and_optional_reference_counterparty(self):
         self.login()

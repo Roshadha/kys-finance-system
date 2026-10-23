@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:ClientDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:ConfigPath = Join-Path $script:ClientDirectory 'server.json'
+$script:IconName = 'kys-finance-pl-blue-20261019.ico'
 
 function Read-KysJson([string]$Text) {
     if ($PSVersionTable.PSVersion.Major -ge 3) { return ($Text | ConvertFrom-Json) }
@@ -25,7 +26,12 @@ function New-KysShortcut([string]$ShortcutDirectory = [Environment]::GetFolderPa
     $link.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $script:ClientDirectory 'KYS Client.ps1') + '"'
     $link.WorkingDirectory = $script:ClientDirectory
     $link.Description = 'Find the KYS Finance server on the company network and open it'
-    $link.IconLocation = Join-Path $script:ClientDirectory 'kys-finance-pl.ico'
+    $newIcon = Join-Path $script:ClientDirectory $script:IconName
+    if (Test-Path -LiteralPath $newIcon) {
+        $link.IconLocation = $newIcon
+    } else {
+        $link.IconLocation = Join-Path $script:ClientDirectory 'kys-finance-pl.ico'
+    }
     $link.Save()
 }
 

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Update account chart · K.Y.S. Finance{% endblock %}
+{% block page_title %}Update account chart{% endblock %}
+{% block content %}
+<section class="hero-row compact"><div><span class="eyebrow">Administrator action</span>
+  <h1>Update account chart</h1>
+  <p>Preview the supplied {{ group_count }} groups and {{ particular_count }} particulars before changing this server. Existing cash entries, dates, amounts and users remain in the database. Earlier reports will show the revised account names and codes.</p>
+</div></section>
+<article class="card form-card single">
+  <h2>Review before applying</h2>
+  <p>Ask everyone to finish saving entries. This action takes a verified database backup first. If an external backup destination is configured, that copy must succeed too. Do not replace or upload the database file.</p>
+  {% if plan.blocked %}
+    <div class="flash error"><strong>Manual mapping required; no changes can be applied yet.</strong>
+      <ul>{% for issue in plan.blocked %}<li>{{ issue }}</li>{% endfor %}</ul>
+    </div>
+  {% endif %}
+  <p>{{ plan.changes|length }} proposed account changes. Entries themselves will not be deleted or re-entered.</p>
+  <div class="table-wrap" style="max-height:22rem;overflow:auto"><ol>
+    {% for change in plan.changes %}<li>{{ change }}</li>{% endfor %}
+  </ol></div>
+  {% if not plan.blocked %}
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="fingerprint" value="{{ plan.fingerprint }}">
+    <label><input type="checkbox" name="confirmed" value="yes" required> I reviewed the changes and asked staff to finish saving.</label>
+    <button class="btn primary" type="submit">Back up and apply account chart</button>
+  </form>
+  {% endif %}
+</article>
+{% endblock %}

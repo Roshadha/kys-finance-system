@@ -20,7 +20,7 @@
         <td><b>{{ group_labels[item.id] }}</b></td><td>{{ item.name }}</td>
         <td><span class="status {{ item.kind }}">{{ item.kind }}</span></td>
         <td>{{ 'Active' if item.active else 'Hidden' }}</td>
-        <td><div class="account-actions"><a class="account-action" href="{{ url_for('group_edit', group_id=item.id) }}">Edit</a><form action="{{ url_for('group_toggle', group_id=item.id) }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="account-action {{ 'account-action-hide' if item.active else 'account-action-enable' }}" type="submit">{{ 'Hide' if item.active else 'Enable' }}</button></form></div></td>
+        <td><div class="account-actions"><a class="account-action" href="{{ url_for('group_edit', group_id=item.id) }}">Edit</a><form action="{{ url_for('group_toggle', group_id=item.id) }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="account-action {{ 'account-action-hide' if item.active else 'account-action-enable' }}" type="submit">{{ 'Hide' if item.active else 'Enable' }}</button></form><form action="{{ url_for('group_delete', group_id=item.id) }}" method="post" onsubmit="return confirm('Delete this empty group permanently?');"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="account-action account-action-delete" type="submit">Delete</button></form></div></td>
       </tr>{% endfor %}</tbody>
     </table></div>
   </article>

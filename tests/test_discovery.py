@@ -26,7 +26,7 @@ $link = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $env:KYS
 if ($link.Arguments -notlike ('*"' + $env:KYS_TEST_CLIENT + '"*')) { throw 'Launcher path was not quoted correctly' }
 if ($link.TargetPath -notlike '*powershell.exe') { throw 'Wrong shortcut target' }
 '''
-            result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", command],
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
                                     env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue((Path(folder) / "KYS Finance.lnk").exists())
@@ -93,7 +93,7 @@ if (Test-KysServer 'invalid/address' 5000) { throw 'Invalid address accepted' }
 $one | ConvertTo-Json -Compress
 '''
         try:
-            result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", command],
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
                                     env=env, capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             reply = json.loads(result.stdout)

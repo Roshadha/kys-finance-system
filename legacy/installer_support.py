@@ -30,7 +30,8 @@ def register_install(target, kind, source, payload_names=None):
         origin = Path(source) / name
         if origin.resolve() != (target / name).resolve():
             shutil.copy2(str(origin), str(target / name))
-    client_files = {'KYS Client.ps1', 'KYS Finance Uninstall.exe', 'kys-finance-pl.ico', 'kys-finance-pl.png', 'client-setup.log'}
+    client_files = {'KYS Client.ps1', 'KYS Finance Uninstall.exe', 'kys-finance-pl.ico',
+                    'kys-finance-pl-blue-20261019.ico', 'kys-finance-pl.png', 'client-setup.log'}
     if kind == 'server' and payload_names is None:
         raise ValueError('Server registration requires the shipped payload file list.')
     owned = set(payload_names or client_files)

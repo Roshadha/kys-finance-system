@@ -11,3 +11,4 @@ foreach ($name in @('Install Company Server.cmd','Install Company Server.ps1','C
 foreach ($name in @('Configure External Backup.cmd','Configure External Backup.ps1','client')) {
     Copy-Item -LiteralPath (Join-Path $root $name) -Destination $output -Recurse -Force
 }
+Copy-Item -LiteralPath (Join-Path $root 'COMPANY-UPDATE-2026-10-24.md') -Destination $output -Force

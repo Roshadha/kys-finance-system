@@ -107,7 +107,7 @@ class GroupReportTests(unittest.TestCase):
         self.assertEqual(self.client.get('/reports?' + self.query([])).status_code, 200)
 
     def test_report_code_order_and_compact_export_styles(self):
-        names = ['Trade Income', 'Bank Interest Income', 'Rental Income', 'Construction Projects Income', 'Inward Taxes']
+        names = ['Trade Income', 'Bank Interest Income', 'Property Rental Income', 'Construction Projects Income', 'Inward Taxes']
         with self.app.app_context():
             for name in reversed(names):
                 cat = Category.query.filter_by(kind='income', group_name=name).first()

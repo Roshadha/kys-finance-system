@@ -4,13 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}K.Y.S. Finance{% endblock %}</title>
+  <script src="{{ url_for('static', filename='theme-toggle.js', v='1') }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='brand.css') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css', v='neutral-20260930') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css', v='light-dark-20261019') }}">
   <script defer src="{{ url_for('static', filename='app.js') }}"></script>
   {% if live_revision is not none and current_user %}<script defer src="{{ url_for('static', filename='live-updates.js', v='1') }}"></script>{% endif %}
 </head>
 <body class="{% if not current_user %}auth-body{% endif %}">
+{% if not current_user %}<button class="theme-switch auth-theme-switch" id="themeSwitch" type="button" aria-label="Switch to dark theme" aria-pressed="false"><span aria-hidden="true">☾</span><span>Dark</span></button>{% endif %}
 {% if current_user %}
   <aside class="sidebar" id="sidebar">
     <div class="brand"><span class="brand-mark kys-logo" role="img" aria-label="K.Y.S. logo"></span><span><strong>K.Y.S.</strong><small>Cash P&amp;L</small></span></div>
@@ -23,6 +25,7 @@
         <a class="{{ 'active' if request.endpoint in ['users','user_new','user_edit'] }}" href="{{ url_for('users') }}"><span>♙</span>Users &amp; access</a>
         <a class="{{ 'active' if request.endpoint in ['categories','category_new','category_toggle'] }}" href="{{ url_for('categories') }}"><span>≡</span>Chart of accounts</a>
         <a class="{{ 'active' if request.endpoint in ['groups','group_new','group_toggle'] }}" href="{{ url_for('groups') }}"><span>▦</span>Groups</a>
+        <a class="{{ 'active' if request.endpoint == 'account_rearrange' }}" href="{{ url_for('account_rearrange') }}"><span>⇄</span>Update account chart</a>
         <a class="{{ 'active' if request.endpoint == 'history' }}" href="{{ url_for('history') }}"><span>◷</span>Audit history</a>
       {% endif %}
     </nav>
@@ -36,6 +39,7 @@
       <button class="menu-btn" id="menuButton" type="button" aria-label="Open navigation">☰</button>
       <div><span class="eyebrow">Cash-based accounting</span><strong>{% block page_title %}Overview{% endblock %}</strong></div>
       <div class="top-actions">
+        <button class="theme-switch" id="themeSwitch" type="button" aria-label="Switch to dark theme" aria-pressed="false"><span aria-hidden="true">☾</span><span>Dark</span></button>
         {% if current_user.role == 'admin' %}<a class="icon-link" href="{{ url_for('change_password') }}" title="Change password">⚙</a>{% endif %}
         <form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">Sign out</button></form>
       </div>
@@ -51,7 +55,7 @@
     </main>
   </div>
 {% endif %}
-{% if current_user and current_user.role == 'admin' %}
+{% if current_user and current_user.can('delete_entries') %}
   <div class="confirm-overlay" id="deleteEntryModal" hidden>
     <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="deleteEntryTitle" aria-describedby="deleteEntryHelp deleteEntrySummary" tabindex="-1">
       <button class="confirm-close" type="button" data-dismiss-delete aria-label="Close confirmation">&times;</button>

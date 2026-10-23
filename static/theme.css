@@ -110,16 +110,23 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .account-action { display: inline-flex; min-width: 64px; min-height: 36px; align-items: center; justify-content: center; padding: 6px 11px; border: 1px solid var(--accent); border-radius: 8px; background: var(--white); color: var(--accent); font: 700 .78rem Manrope, sans-serif; cursor: pointer; text-decoration: none; }
 .account-action:hover { background: var(--mint); }
 .account-action:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-.account-action-hide { border-color: var(--red); background: var(--red-bg); color: var(--red); }
-.account-action-hide:hover { background: #e8d6d2; }
+.account-action-hide { border-color: #b7791f; background: #fbf1dc; color: #8a5a12; }
+.account-action-hide:hover { background: #f5e4bd; }
 .account-action-enable { border-color: #376b58; background: #e3efe9; color: #285b47; }
 .account-action-enable:hover { background: #d0e6d9; }
-.account-action-hide:focus-visible { outline-color: var(--red); }
+.account-action-hide:focus-visible { outline-color: #b7791f; }
 .account-action-enable:focus-visible { outline-color: #285b47; }
+.account-action-delete { border-color: #b3261e; background: #c62828; color: #fff; }
+.account-action-delete:hover { background: #a31f1f; }
+.account-action-delete:focus-visible { outline-color: var(--red); }
 .month-link:hover span, .month-link:focus span { color: var(--ink); font-weight: 700; }
 .month-link[aria-current="date"] { background: var(--surface-selected); box-shadow: inset 0 -3px 0 var(--accent); }
 .month-link[aria-current="date"] span { color: var(--ink); font-weight: 700; }
 .ledger-actions { display: flex; flex-wrap: wrap; gap: 12px; min-width: 240px; }
+.bulk-ledger-tools { display: flex; align-items: center; justify-content: flex-end; gap: 16px; padding: 0 0 14px; color: var(--ink); font-size: .85rem; }
+.bulk-ledger-tools .delete-action { color: var(--red); border-color: var(--red); }
+.ledger-check { display: inline-flex; align-items: center; gap: 6px; font-size: .75rem; white-space: nowrap; cursor: pointer; }
+.ledger-check input, .entry-selection { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
 .ledger-actions .btn { min-height: 40px; padding: 9px 14px; font-size: .8rem; white-space: nowrap; }
 .ledger-actions .delete-action { color: var(--red); border-color: var(--red); }
 .ledger-actions .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
@@ -129,4 +136,86 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   .login-shell { grid-template-columns: 1fr; }
   .login-panel { display: none; }
   .login-form-wrap { padding: 28px 20px; }
+}
+
+/* The choice is kept in this browser; it does not change another user's view. */
+.theme-switch { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 20px; background: var(--white); color: var(--ink); font-size: .76rem; font-weight: 700; white-space: nowrap; }
+.theme-switch span:first-child { font-size: 1.05rem; line-height: 1; }
+.theme-switch:hover { border-color: var(--accent); background: var(--surface-selected); }
+.theme-switch:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.auth-theme-switch { position: fixed; top: 20px; right: 24px; z-index: 50; }
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ink: #edf2f5;
+  --muted: #b4c4cd;
+  --accent: #a8cee0;
+  --accent-rgb: 168, 206, 224;
+  --line: #41515c;
+  --paper: #152029;
+  --white: #24323d;
+  --surface-soft: #202d37;
+  --surface-selected: #344b59;
+  --mint: #2b414c;
+  --lime: #edf2f5;
+  --red: #f0aaa3;
+  --red-bg: #433238;
+  --gold: #e0bd83;
+  --shadow: 0 8px 28px rgba(0, 0, 0, .18);
+}
+:root[data-theme="dark"] .sidebar nav a:hover { background: #30434e; }
+:root[data-theme="dark"] .sidebar nav a.active { background: var(--surface-selected); }
+:root[data-theme="dark"] .brand-mark.kys-logo { background-color: #f8f7f4; }
+:root[data-theme="dark"] .theme-switch,
+:root[data-theme="dark"] .icon-link,
+:root[data-theme="dark"] .card,
+:root[data-theme="dark"] .kpi,
+:root[data-theme="dark"] .account-action,
+:root[data-theme="dark"] .confirm-dialog,
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea { background-color: var(--white); color: var(--ink); border-color: var(--line); }
+:root[data-theme="dark"] .theme-switch:hover,
+:root[data-theme="dark"] .account-action:hover { background: var(--surface-selected); }
+:root[data-theme="dark"] .password-toggle { color: var(--accent); }
+:root[data-theme="dark"] .password-toggle:hover { background: var(--surface-selected); }
+:root[data-theme="dark"] .btn.primary,
+:root[data-theme="dark"] .btn.excel { color: var(--paper); }
+:root[data-theme="dark"] .btn.secondary { background: var(--white); color: var(--accent); border-color: var(--accent); }
+:root[data-theme="dark"] .btn.confirm-danger { background: var(--red); color: var(--paper); }
+:root[data-theme="dark"] .account-action-hide { background: var(--red-bg); color: var(--red); border-color: var(--red); }
+:root[data-theme="dark"] .account-action-enable { background: #24483b; color: #b5e7cd; border-color: #5eb68b; }
+:root[data-theme="dark"] .kpi.profit,
+:root[data-theme="dark"] .report-strip,
+:root[data-theme="dark"] .login-panel { background: var(--surface-soft); color: var(--ink); }
+:root[data-theme="dark"] .kpi > span,
+:root[data-theme="dark"] .kpi small,
+:root[data-theme="dark"] .bar-group span,
+:root[data-theme="dark"] .cell-note,
+:root[data-theme="dark"] .optional,
+:root[data-theme="dark"] .login-copy p,
+:root[data-theme="dark"] .login-foot { color: var(--muted); }
+:root[data-theme="dark"] th,
+:root[data-theme="dark"] label,
+:root[data-theme="dark"] .task-fieldset legend { color: var(--ink); }
+:root[data-theme="dark"] td,
+:root[data-theme="dark"] .quick-list a,
+:root[data-theme="dark"] .quick-list button { border-bottom-color: var(--line); }
+:root[data-theme="dark"] tbody tr:hover { background: rgba(var(--accent-rgb), .08); }
+:root[data-theme="dark"] .bar-chart { background: repeating-linear-gradient(to bottom, transparent 0, transparent 53px, rgba(var(--accent-rgb), .08) 54px); }
+:root[data-theme="dark"] .flash,
+:root[data-theme="dark"] .login-help,
+:root[data-theme="dark"] .locked-note,
+:root[data-theme="dark"] .tag-list span,
+:root[data-theme="dark"] .tag,
+:root[data-theme="dark"] .status,
+:root[data-theme="dark"] .status.disabled { background: var(--mint); color: var(--ink); border-color: var(--line); }
+:root[data-theme="dark"] .flash.error { background: var(--red-bg); color: var(--red); }
+:root[data-theme="dark"] .confirm-overlay { background: rgba(0, 0, 0, .7); }
+:root[data-theme="dark"] .confirm-summary { background: var(--paper); }
+:root[data-theme="dark"] .report-strip .result { background: var(--white); }
+@media (max-width: 480px) {
+  .top-actions { gap: 8px; }
+  .theme-switch { padding: 5px 9px; }
+  .auth-theme-switch { top: 12px; right: 12px; }
 }

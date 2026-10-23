@@ -20,7 +20,9 @@ inspect_workbook.mjs
 System Flow.xlsx
 
 # Generated workbook, report, and rendering artifacts
-assets/
+assets/*
+!assets/kys-finance-pl.png
+!assets/kys-finance-pl.ico
 backups/
 output/
 report_build_tmp/

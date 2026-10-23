@@ -28,6 +28,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const deleteModal = document.getElementById('deleteEntryModal');
   const deleteForm = document.getElementById('deleteEntryForm');
   const deleteSubmit = document.getElementById('deleteEntrySubmit');
+  const bulkForm = document.getElementById('bulkDeleteForm');
+  const bulkButton = document.getElementById('bulkDeleteButton');
+  const selectAll = document.getElementById('selectAllEntries');
+  const entrySelections = Array.from(document.querySelectorAll('.entry-selection'));
   let deleteTrigger = null;
   let deletionPending = false;
   const modalBackground = [];
@@ -48,6 +52,9 @@ document.addEventListener('DOMContentLoaded', () => {
       event.preventDefault();
       deleteTrigger = link;
       deleteForm.action = link.href;
+      deleteForm.querySelectorAll('[data-bulk-id]').forEach(input => input.remove());
+      document.getElementById('deleteEntryTitle').textContent = 'Delete this entry?';
+      deleteSubmit.textContent = 'Yes, delete entry';
       document.getElementById('deleteEntrySummary').textContent = link.dataset.entrySummary;
       deleteModal.hidden = false;
       document.body.classList.add('confirmation-open');
@@ -58,6 +65,44 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
   });
+  if (bulkForm && bulkButton && selectAll && deleteModal && deleteForm) {
+    const updateSelection = () => {
+      const count = entrySelections.filter(input => input.checked).length;
+      bulkButton.disabled = count === 0;
+      selectAll.checked = count === entrySelections.length;
+      selectAll.indeterminate = count > 0 && count < entrySelections.length;
+      document.getElementById('bulkSelectionCount').textContent = `${count} selected on this page`;
+    };
+    selectAll.addEventListener('change', () => {
+      entrySelections.forEach(input => { input.checked = selectAll.checked; });
+      updateSelection();
+    });
+    entrySelections.forEach(input => input.addEventListener('change', updateSelection));
+    bulkForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const selected = entrySelections.filter(input => input.checked);
+      if (!selected.length) return;
+      deleteTrigger = bulkButton;
+      deleteForm.action = bulkForm.action;
+      deleteForm.querySelectorAll('[data-bulk-id]').forEach(input => input.remove());
+      selected.forEach(input => {
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden'; hidden.name = 'transaction_ids'; hidden.value = input.value;
+        hidden.dataset.bulkId = 'true';
+        deleteForm.appendChild(hidden);
+      });
+      document.getElementById('deleteEntryTitle').textContent = `Delete ${selected.length} selected entries?`;
+      document.getElementById('deleteEntrySummary').textContent = `${selected.length} ledger entries selected on this page`;
+      deleteSubmit.textContent = `Yes, delete ${selected.length} entries`;
+      deleteModal.hidden = false;
+      document.body.classList.add('confirmation-open');
+      document.getElementById('deleteEntryCancel').focus();
+      document.querySelectorAll('.sidebar, .app-shell').forEach(el => {
+        modalBackground.push([el, el.getAttribute('aria-hidden')]);
+        el.setAttribute('aria-hidden', 'true');
+      });
+    });
+  }
   if (deleteModal) {
     deleteModal.querySelectorAll('[data-dismiss-delete]').forEach(button => button.addEventListener('click', closeDeleteModal));
     deleteModal.addEventListener('click', event => { if (event.target === deleteModal) closeDeleteModal(); });
@@ -169,6 +214,30 @@ document.addEventListener('DOMContentLoaded', () => {
   const updateTasks = () => { if (role && tasks) tasks.hidden = role.value === 'admin'; };
   if (role) role.addEventListener('change', updateTasks);
   updateTasks();
+
+  // A local visibility toggle for every login and account password input.
+  document.querySelectorAll('input[type="password"]').forEach(input => {
+    if (input.dataset.toggleBound) return;
+    input.dataset.toggleBound = '1';
+    const wrap = document.createElement('span');
+    wrap.className = 'password-wrap';
+    input.parentNode.insertBefore(wrap, input);
+    wrap.appendChild(input);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'password-toggle';
+    button.textContent = 'Show';
+    button.setAttribute('aria-label', 'Show password');
+    button.setAttribute('aria-pressed', 'false');
+    button.addEventListener('click', () => {
+      const showing = input.type === 'password';
+      input.type = showing ? 'text' : 'password';
+      button.textContent = showing ? 'Hide' : 'Show';
+      button.setAttribute('aria-label', showing ? 'Hide password' : 'Show password');
+      button.setAttribute('aria-pressed', String(showing));
+    });
+    wrap.appendChild(button);
+  });
 
   document.querySelectorAll('.flash').forEach((el) => setTimeout(() => el.remove(), 6000));
 });

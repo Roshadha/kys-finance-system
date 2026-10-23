@@ -4,7 +4,7 @@ from datetime import date
 from urllib.parse import urlencode
 
 import test_app
-from app import Category, Group, Transaction, build_report, db, seed_database
+from app import Category, Group, Transaction, build_report, db, seed_database, group_codes, particular_codes
 
 
 class TaxGroupTests(unittest.TestCase):
@@ -15,24 +15,19 @@ class TaxGroupTests(unittest.TestCase):
         test_app.FinanceAppTests.setUp(self)
         self.login()
 
-    def test_new_groups_are_added_to_existing_database_once(self):
+    def test_existing_database_is_not_silently_recoded_on_startup(self):
         with self.app.app_context():
-            for kind, group in (("income", "Inward Taxes"), ("expense", "Tax Expenditure")):
-                Category.query.filter_by(kind=kind, group_name=group).delete()
-                Group.query.filter_by(kind=kind, name=group).delete()
+            original = (Group.query.count(), Category.query.count())
             db.session.commit()
             seed_database()
             seed_database()
-            for kind, group in (("income", "Inward Taxes"), ("expense", "Tax Expenditure")):
-                self.assertEqual(Group.query.filter_by(kind=kind, name=group).count(), 1)
-                self.assertEqual({c.name for c in Category.query.filter_by(kind=kind, group_name=group)},
-                                 {"SSCL", "VAT"})
+            self.assertEqual((Group.query.count(), Category.query.count()), original)
 
     def test_trade_income_uses_subtotal_only_and_tax_groups_report_separately(self):
         with self.app.app_context():
             trade = Category.query.filter_by(kind="income", group_name="Trade Income").first()
-            inward = Category.query.filter_by(kind="income", group_name="Inward Taxes", name="SSCL").one()
-            outward = Category.query.filter_by(kind="expense", group_name="Tax Expenditure", name="VAT").one()
+            inward = Category.query.filter_by(kind="income", group_name="Inward Taxes", name="Security Service Inward SSCL").one()
+            outward = Category.query.filter_by(kind="expense", group_name="Outward Taxes", name="Security Service Outward VAT").one()
             ids = trade.id, inward.id, outward.id
 
         page = self.client.get("/transactions/new?kind=income")
@@ -50,7 +45,7 @@ class TaxGroupTests(unittest.TestCase):
         for kind, group, category_id, amount in (
                 ("income", "Trade Income", ids[0], "1000"),
                 ("income", "Inward Taxes", ids[1], "150"),
-                ("expense", "Tax Expenditure", ids[2], "80")):
+                ("expense", "Outward Taxes", ids[2], "80")):
             response = self.client.post(f"/transactions/new?kind={kind}", data={
                 "csrf_token": self.csrf(), "kind": kind, "group_name": group,
                 "category_id": category_id, "cash_date": day, "subtotal": amount,
@@ -62,7 +57,7 @@ class TaxGroupTests(unittest.TestCase):
             self.assertEqual((float(trade_entry.total), float(trade_entry.sscl), float(trade_entry.vat)),
                              (1000, 0, 0))
             keys = [json.dumps(["income", "Inward Taxes"]),
-                    json.dumps(["expense", "Tax Expenditure"])]
+                    json.dumps(["expense", "Outward Taxes"])]
             report = build_report(date.today(), date.today(), selected_groups=keys)
             self.assertEqual((report["income"], report["expense"], report["pl"]), (150, 80, 70))
 
@@ -71,7 +66,7 @@ class TaxGroupTests(unittest.TestCase):
         self.assertEqual(report_page.status_code, 200)
         self.assertIn(b'class="group-dropdown"', report_page.data)
         self.assertIn(b'Inward Taxes', report_page.data)
-        self.assertIn(b'Tax Expenditure', report_page.data)
+        self.assertIn(b'Outward Taxes', report_page.data)
         self.assertNotIn(b'Security Service Income', report_page.data.split(b'Income Particulars')[-1])
         export = self.client.get("/reports/export?" + query)
         self.assertEqual(export.status_code, 200)
@@ -88,25 +83,20 @@ class SequentialIdTests(unittest.TestCase):
 
     def test_seeded_ids_follow_the_sequence(self):
         with self.app.app_context():
-            groups = {g.name: g.id for g in Group.query.all()}
-            # Income groups: IG_, +100 each. Expenditure groups: EG_, +100 each.
-            self.assertEqual(groups["Trade Income"], "IG_100")
-            self.assertEqual(groups["Bank Interest Income"], "IG_200")
-            self.assertEqual(groups["Rental Income"], "IG_300")
-            self.assertEqual(groups["Direct Trade Expenditure"], "EG_100")
-            self.assertEqual(groups["Operational Expenditure"], "EG_200")
-
-            # Income particulars: IP_, +10 each. Expenditure particulars: EP_, +10 each.
-            income_ids = sorted(c.id for c in Category.query.filter_by(kind="income").all())
-            expense_ids = sorted(c.id for c in Category.query.filter_by(kind="expense").all())
-            self.assertEqual(income_ids[0], "IP_0010")
-            self.assertEqual(income_ids[1], "IP_0020")
-            self.assertEqual(income_ids[2], "IP_0030")
-            self.assertEqual(expense_ids[0], "EP_0010")
-            self.assertEqual(expense_ids[1], "EP_0020")
-            self.assertEqual(expense_ids[2], "EP_0030")
-            all_ids = income_ids + expense_ids
-            self.assertEqual(len(set(all_ids)), len(all_ids))
+            group_public = group_codes()
+            particular_public = particular_codes()
+            groups = {g.name: group_public[g.id] for g in Group.query.all()}
+            self.assertEqual(groups["Trade Income"], 10)
+            self.assertEqual(groups["Bank Interest Income"], 20)
+            self.assertEqual(groups["Property Rental Income"], 30)
+            self.assertEqual(groups["Direct Trade Expenditure"], 10)
+            self.assertEqual(groups["Operational Expenditure"], 20)
+            income = Category.query.filter_by(kind="income", name="Security Service Income").one()
+            expense = Category.query.filter_by(kind="expense", name="Security Service Salary Expenditure").one()
+            self.assertEqual(particular_public[income.id], 100)
+            self.assertEqual(particular_public[expense.id], 100)
+            all_ids = [c.id for c in Category.query.all()]
+            self.assertEqual(len(all_ids), len(set(all_ids)))
             self.assertTrue(all(c.group_id for c in Category.query.all()))
 
     def test_new_group_and_particular_get_next_ids(self):

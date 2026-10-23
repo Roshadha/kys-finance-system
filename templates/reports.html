@@ -7,16 +7,6 @@
   <div><span class="eyebrow">Cash basis only</span><h1>Profit &amp; loss reporting</h1><p>Only actual money received and actually paid in the selected period is included.</p></div>
   <a class="btn excel" href="{{ url_for('reports_export', type=report_type, start=start, end=end, group=selected_groups) }}">↓ Export Excel</a>
 </section>
-{% if current_user.role == 'admin' %}
-<form class="card report-controls" method="post" action="{{ url_for('period_status') }}">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <input type="hidden" name="year" value="{{ start.year }}">
-  <input type="hidden" name="month_number" value="{{ start.month }}">
-  <p><strong>{{ start.strftime('%B %Y') }}: {{ 'Closed' if period_closed else 'Open' }}</strong> · Edits restate the original month. Closing prevents new entries, edits, adjustments and deletion in this month.</p>
-  <label>Reason<input name="reason" required maxlength="240" placeholder="Reason for closing or reopening this month"></label>
-  <button class="btn secondary" name="action" value="{{ 'open' if period_closed else 'close' }}">{{ 'Reopen month' if period_closed else 'Close month' }}</button>
-</form>
-{% endif %}
 <form class="card report-controls" method="get">
   <div class="filters">
     <label>Report<select name="type">

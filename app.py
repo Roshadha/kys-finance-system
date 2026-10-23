@@ -40,6 +40,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.schema import CreateIndex, CreateTable
 from werkzeug.security import check_password_hash, generate_password_hash
+from account_catalog import GROUPS as CATALOG_GROUPS, PARTICULARS as CATALOG_PARTICULARS
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -66,12 +67,26 @@ TASKS = {
     "expense_entry": "Expenditure data entry",
     "vat_entry": "VAT / tax data entry",
     "view_reports": "View reports",
+    "delete_entries": "Delete ledger entries",
+    "edit_entries": "Edit ledger entries",
 }
 ROLES = {"admin": "Administrator", "data_entry": "Data Entry", "management": "Management"}
 SUBTOTAL_ONLY_GROUPS = {
     ("income", "Trade Income"),
     ("income", "Inward Taxes"),
     ("expense", "Tax Expenditure"),
+    ("expense", "Outward Taxes"),
+}
+
+# Only unambiguous legacy labels are renamed automatically. A posted account
+# without a match blocks the import so staff can choose its destination first.
+CATALOG_ALIASES = {
+    ('income', 'Property Rental Income'): ('Rental Income',),
+    ('expense', 'Property Maintenance Expenditure'): ('Maintenance Expenditure',),
+    ('expense', 'Staff Training Programme Expenditure'): ('Staff Training & Programme Expenditure',),
+    ('expense', 'Cleaning Items, Materials & Equipment Expenditure'):
+        ('Cleaning Items & Materials Expenditure',),
+    ('expense', 'Construction Projects Expenditure 1'): ('Construction Projects Expenditure',),
 }
 
 
@@ -542,13 +557,6 @@ def live_transactions():
     return Transaction.query.filter(~func.cast(Transaction.id, db.String).in_(deleted))
 
 
-def period_is_closed(day):
-    key = day.strftime('%Y-%m')
-    latest = AuditLog.query.filter_by(entity_type='period', entity_id=key).filter(
-        AuditLog.action.in_(['period_close', 'period_open'])).order_by(AuditLog.id.desc()).first()
-    return bool(latest and latest.action == 'period_close')
-
-
 def group_codes():
     codes = {g.id: numeric_part(g.id) // 10 for g in Group.query.all()}
     for record in AuditLog.query.filter_by(entity_type='group', action='group_code').order_by(AuditLog.id).all():
@@ -587,6 +595,106 @@ def sorted_categories(items):
     codes = group_codes()
     particulars = particular_codes()
     return sorted(items, key=lambda c: (c.kind != 'income', codes.get(c.group_id, 0), particulars[c.id], c.id))
+
+
+def account_catalog_plan():
+    """Plan a non-destructive chart update against the current database."""
+    groups = Group.query.all()
+    particulars = Category.query.all()
+    current_group_codes = group_codes()
+    current_particular_codes = particular_codes()
+    posted_ids = {row[0] for row in db.session.query(Transaction.category_id).distinct()}
+    matched_groups, matched_particulars = set(), set()
+    desired_groups, desired_particulars, changes, blocked = [], [], [], []
+
+    def find_match(items, kind, name, used):
+        labels = {name.casefold(), *(alias.casefold() for alias in CATALOG_ALIASES.get((kind, name), ()))}
+        candidates = [item for item in items if item.kind == kind and item.name.strip().casefold() in labels
+                      and item.id not in used]
+        if len(candidates) > 1:
+            blocked.append(f'Ambiguous match for {kind} / {name}. Review duplicate names first.')
+            return None
+        return candidates[0] if candidates else None
+
+    for kind, code, name in CATALOG_GROUPS:
+        item = find_match(groups, kind, name, matched_groups)
+        if item:
+            matched_groups.add(item.id)
+            before = format_id(GROUP_PREFIX[kind], current_group_codes[item.id], 4)
+            if before != code or item.name != name or not item.active:
+                changes.append(f'Group: {before} · {item.name} → {code} · {name}')
+        else:
+            changes.append(f'Add group: {code} · {name}')
+        desired_groups.append((kind, code, name, item))
+
+    for kind, group_code, code, name in CATALOG_PARTICULARS:
+        item = find_match(particulars, kind, name, matched_particulars)
+        if item:
+            matched_particulars.add(item.id)
+            before = format_id(CATEGORY_PREFIX[kind], current_particular_codes[item.id], 4)
+            group_name = next(gname for gkind, gcode, gname, _ in desired_groups if gcode == group_code)
+            if before != code or item.name != name or item.group_name != group_name or not item.active:
+                changes.append(f'Particular: {before} · {item.name} → {code} · {name} ({group_name})')
+        else:
+            changes.append(f'Add particular: {code} · {name}')
+        desired_particulars.append((kind, group_code, code, name, item))
+
+    unmatched_particulars = [item for item in particulars if item.id not in matched_particulars]
+    legacy_particulars = [item for item in unmatched_particulars
+                          if item.active or current_particular_codes[item.id] < 900000]
+    for item in unmatched_particulars:
+        if item.id in posted_ids:
+            blocked.append(f'Posted account needs manual mapping: {item.id} · {item.name}')
+        elif item in legacy_particulars:
+            changes.append(f'Hide unused old particular: {item.name}')
+    legacy_groups = [item for item in groups if item.id not in matched_groups
+                     and (item.active or current_group_codes[item.id] < 900000)]
+    for item in legacy_groups:
+        changes.append(f'Hide old group: {item.name}')
+
+    snapshot = {
+        'groups': sorted((g.id, g.kind, g.name, g.active, current_group_codes[g.id]) for g in groups),
+        'particulars': sorted((c.id, c.kind, c.group_id, c.name, c.active,
+                               current_particular_codes[c.id]) for c in particulars),
+        'posted': sorted(posted_ids),
+        'audit_id': db.session.query(func.max(AuditLog.id)).scalar(),
+    }
+    fingerprint = hashlib.sha256(json.dumps(snapshot, default=str).encode()).hexdigest()
+    return {'groups': desired_groups, 'particulars': desired_particulars,
+            'legacy_groups': legacy_groups, 'legacy_particulars': legacy_particulars,
+            'changes': changes, 'blocked': blocked, 'fingerprint': fingerprint}
+
+
+def apply_account_catalog(plan):
+    """Apply an already-validated plan in one database transaction."""
+    groups_by_code = {}
+    for kind, code, name, item in plan['groups']:
+        if item is None:
+            item = Group(kind=kind, name=name)
+            db.session.add(item)
+            db.session.flush()
+        item.name, item.active = name, True
+        groups_by_code[code] = item
+        audit('group_code', 'group', item.id, str(int(code.split('_')[1])))
+    for kind, group_code, code, name, item in plan['particulars']:
+        group = groups_by_code[group_code]
+        if item is None:
+            item = Category(kind=kind, group_id=group.id, group_name=group.name, name=name)
+            db.session.add(item)
+            db.session.flush()
+        item.group_id, item.group_name, item.name, item.active = group.id, group.name, name, True
+        audit('account_code', 'category', item.id, str(int(code.split('_')[1])))
+    # Unused legacy accounts remain in audit/history but cannot be chosen for
+    # new entries. Their reserved codes cannot collide with workbook codes.
+    for index, item in enumerate(plan['legacy_groups'], 1):
+        item.active = False
+        audit('group_code', 'group', item.id, str(900000 + index))
+    for index, item in enumerate(plan['legacy_particulars'], 1):
+        item.active = False
+        audit('account_code', 'category', item.id, str(900000 + index))
+    audit('catalog_sync', 'database', None,
+          f"Rearranged Particulars: {len(plan['groups'])} groups, {len(plan['particulars'])} particulars")
+    db.session.flush()
 
 
 def period_from_request():
@@ -924,23 +1032,12 @@ def register_context(app):
             token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
             if not secrets.compare_digest(token or "", session.get("csrf_token", "")):
                 abort(400, "Invalid or expired form token. Refresh the page and try again.")
-            financial = {'transaction_new', 'transaction_edit', 'transaction_delete', 'adjustment_new', 'period_status'}
+            financial = {'transaction_new', 'transaction_edit', 'transaction_delete',
+                         'transaction_delete_selected', 'adjustment_new'}
             if request.endpoint in financial and current_user() and current_user().active:
-                # Lock before checking closed status and hold it through commit.
-                # Period close/reopen and posting therefore cannot race.
+                # Serialize financial writes so concurrent edits and deletions cannot race.
                 if db.engine.dialect.name == 'sqlite':
                     db.session.execute(text('BEGIN IMMEDIATE'))
-                posting_date = None
-                if request.endpoint == 'transaction_new':
-                    try:
-                        posting_date = month_period(request.form)[0] if 'month_number' in request.form else parse_date(request.form.get('cash_date'))
-                    except ValueError:
-                        pass  # Normal form validation gives the detailed message.
-                elif request.endpoint != 'period_status':
-                    txn = db.session.get(Transaction, (request.view_args or {}).get('transaction_id'))
-                    posting_date = txn.cash_date if txn else None
-                if posting_date and period_is_closed(posting_date):
-                    abort(409, 'This month is closed. An administrator must reopen it with a reason before changing entries.')
 
 
 def data_revision():
@@ -1031,6 +1128,8 @@ def register_routes(app):
     @login_required
     def dashboard():
         if not current_user().can('view_reports'):
+            if current_user().can('delete_entries') or current_user().can('edit_entries'):
+                return redirect(url_for('transactions'))
             if current_user().can('income_entry'):
                 return redirect(url_for('transaction_new', kind='income'))
             if current_user().can('expense_entry'):
@@ -1075,7 +1174,7 @@ def register_routes(app):
         start, end = period_from_request()
         kind = request.args.get("kind", "")
         query = live_transactions().join(Category).filter(Transaction.cash_date.between(start, end))
-        if not current_user().can('view_reports'):
+        if not (current_user().can('view_reports') or current_user().can('delete_entries') or current_user().can('edit_entries')):
             query = query.filter(Transaction.created_by_id == current_user().id)
         if kind in {"income", "expense"}:
             query = query.filter(Category.kind == kind)
@@ -1158,14 +1257,14 @@ def register_routes(app):
                                subtotal_only_groups=subtotal_only_groups)
 
     @app.route('/transactions/<int:transaction_id>/delete', methods=['GET', 'POST'])
-    @role_required('admin')
+    @task_required('delete_entries')
     def transaction_delete(transaction_id):
         txn = live_transactions().filter_by(id=transaction_id).first_or_404()
         if request.method == 'POST':
             if request.form.get('confirmed') != 'yes':
                 flash('Please confirm before deleting this entry.', 'error')
             else:
-                audit('delete', 'transaction', txn.id, json.dumps({'confirmation': 'Confirmed by administrator', 'reference': txn.reference,
+                audit('delete', 'transaction', txn.id, json.dumps({'confirmation': 'Confirmed by signed-in user', 'reference': txn.reference,
                     'date': txn.cash_date.isoformat(), 'total': str(txn.total),
                     'deleted_cash_total': str(txn.adjusted_total), 'account': txn.category_id}))
                 db.session.commit()
@@ -1173,8 +1272,32 @@ def register_routes(app):
                 return redirect(url_for('transactions', year=txn.cash_date.year, month_number=txn.cash_date.month))
         return render_template('transaction_delete.html', txn=txn)
 
+    @app.post('/transactions/delete-selected')
+    @task_required('delete_entries')
+    def transaction_delete_selected():
+        raw_ids = request.form.getlist('transaction_ids')
+        if not raw_ids or len(raw_ids) > 100 or len(set(raw_ids)) != len(raw_ids) or any(
+                not value.isdecimal() or int(value) <= 0 for value in raw_ids):
+            abort(400, 'Select between 1 and 100 distinct ledger entries.')
+        if request.form.get('confirmed') != 'yes':
+            abort(400, 'Confirm deletion of the selected entries.')
+        ids = [int(value) for value in raw_ids]
+        transactions = live_transactions().filter(Transaction.id.in_(ids)).all()
+        if len(transactions) != len(ids):
+            abort(409, 'One or more selected entries have changed. Refresh the ledger and try again.')
+        for txn in transactions:
+            audit('delete', 'transaction', txn.id, json.dumps({
+                'confirmation': 'Confirmed selected-entry deletion by signed-in user',
+                'reference': txn.reference, 'date': txn.cash_date.isoformat(),
+                'total': str(txn.total), 'deleted_cash_total': str(txn.adjusted_total),
+                'account': txn.category_id}))
+        db.session.commit()
+        flash(f'{len(transactions)} selected entries removed from totals and reports. Audit records are retained.', 'success')
+        return redirect(url_for('transactions', year=transactions[0].cash_date.year,
+                                month_number=transactions[0].cash_date.month))
+
     @app.route("/transactions/<int:transaction_id>/edit", methods=["GET", "POST"])
-    @role_required("admin")
+    @task_required('edit_entries')
     def transaction_edit(transaction_id):
         # Financial POSTs are serialized in csrf_and_session before period checks.
         txn = live_transactions().filter_by(id=transaction_id).first_or_404()
@@ -1246,25 +1369,7 @@ def register_routes(app):
         groups, selected_groups = selected_report_groups()
         data = build_report(start, end, report_type, selected_groups)
         return render_template("reports.html", data=data, start=start, end=end, report_type=report_type,
-                               groups=groups, selected_groups=selected_groups,
-                               period_closed=period_is_closed(start))
-
-    @app.post('/reports/period-status')
-    @role_required('admin')
-    def period_status():
-        try:
-            month, _ = month_period(request.form)
-        except ValueError as error:
-            abort(400, str(error))
-        reason = request.form.get('reason', '').strip()
-        action = request.form.get('action')
-        if action not in {'close', 'open'} or not reason or len(reason) > 240:
-            abort(400, 'Choose close/reopen and enter a reason (1–240 characters).')
-        audit('period_close' if action == 'close' else 'period_open', 'period',
-              month.strftime('%Y-%m'), json.dumps({'reason': reason}))
-        db.session.commit()
-        flash('Month closed.' if action == 'close' else 'Month reopened. Changes restate this month’s P&L.', 'success')
-        return redirect(url_for('reports', year=month.year, month_number=month.month))
+                               groups=groups, selected_groups=selected_groups)
 
     @app.get("/reports/export")
     @task_required("view_reports")
@@ -1501,6 +1606,20 @@ def register_routes(app):
         flash("Account availability updated.", "success")
         return redirect(url_for("categories"))
 
+    @app.post("/categories/<category_id>/delete")
+    @role_required("admin")
+    def category_delete(category_id):
+        item = db.get_or_404(Category, category_id)
+        if Transaction.query.filter_by(category_id=item.id).first():
+            flash("This particular has posted entries. Hide it instead to preserve history.", "error")
+            return redirect(url_for("categories"))
+        name = item.name
+        audit("delete", "category", item.id, f"Deleted unused particular {name}")
+        db.session.delete(item)
+        db.session.commit()
+        flash(f"Particular {name} deleted.", "success")
+        return redirect(url_for("categories"))
+
     @app.get("/groups")
     @role_required("admin")
     def groups():
@@ -1579,6 +1698,63 @@ def register_routes(app):
         db.session.commit()
         flash("Group availability updated.", "success")
         return redirect(url_for("groups"))
+
+    @app.post("/groups/<group_id>/delete")
+    @role_required("admin")
+    def group_delete(group_id):
+        item = db.get_or_404(Group, group_id)
+        if Category.query.filter_by(group_id=item.id).first():
+            flash("This group still has particulars. Move or hide them first.", "error")
+            return redirect(url_for("groups"))
+        name = item.name
+        audit("delete", "group", item.id, f"Deleted empty group {name}")
+        db.session.delete(item)
+        db.session.commit()
+        flash(f"Group {name} deleted.", "success")
+        return redirect(url_for("groups"))
+
+    @app.route('/accounts/rearrange', methods=['GET', 'POST'])
+    @role_required('admin')
+    def account_rearrange():
+        plan = account_catalog_plan()
+        if request.method == 'POST':
+            if plan['blocked'] or request.form.get('fingerprint') != plan['fingerprint']:
+                flash('Account list changed or needs manual mapping. Review the preview again.', 'error')
+                return redirect(url_for('account_rearrange'))
+            if request.form.get('confirmed') != 'yes':
+                flash('Confirm the account changes first.', 'error')
+                return redirect(url_for('account_rearrange'))
+            # Take a verified snapshot before restating historic report labels.
+            try:
+                local_backup, external_backup, external_error = make_backup(app, force_external=True)
+                if external_error:
+                    raise RuntimeError('External backup failed: ' + external_error)
+                db.session.rollback()
+                if db.engine.dialect.name == 'sqlite':
+                    db.session.execute(text('BEGIN IMMEDIATE'))
+                plan = account_catalog_plan()
+                if plan['blocked'] or request.form['fingerprint'] != plan['fingerprint']:
+                    raise ValueError('Account list changed during backup. Nothing was updated; review again.')
+                before = db.session.query(func.count(Transaction.id), func.sum(Transaction.total)).one()
+                apply_account_catalog(plan)
+                after = db.session.query(func.count(Transaction.id), func.sum(Transaction.total)).one()
+                if before != after:
+                    raise RuntimeError('Ledger totals changed unexpectedly. Account update cancelled.')
+                for model, codes in ((Group, group_codes()), (Category, particular_codes())):
+                    for kind in ('income', 'expense'):
+                        values = [codes[item.id] for item in model.query.filter_by(kind=kind).all()]
+                        if len(values) != len(set(values)):
+                            raise RuntimeError('Duplicate account codes detected. Account update cancelled.')
+                db.session.commit()
+                flash(f'Account chart updated. Ledger entries retained. Safety backup: {local_backup.name}' +
+                      (f'; external copy: {external_backup}' if external_backup else ''), 'success')
+                return redirect(url_for('categories'))
+            except (RuntimeError, ValueError, IntegrityError, OperationalError) as exc:
+                db.session.rollback()
+                flash(str(exc), 'error')
+                return redirect(url_for('account_rearrange'))
+        return render_template('account_rearrange.html', plan=plan,
+                               group_count=len(CATALOG_GROUPS), particular_count=len(CATALOG_PARTICULARS))
 
     @app.post("/backup")
     @role_required("admin")
@@ -1720,71 +1896,30 @@ def seed_database():
             db.session.add(user)
 
     if not Category.query.first():
-        def add(kind, group, name, service=None, entity=None):
-            create_category(kind, group, name, service=service, entity=entity)
-
-        add("income", "Trade Income", "Security Service Income", "Security")
-        add("income", "Trade Income", "Cleaning Service Income", "Cleaning")
-        add("income", "Bank Interest Income", "Bank Interest Received")
-        properties = [
-            "K.Y.S. Auto Service", "Pinarawa Housing Complex", "Welekade Shops", "Ratwatta Guest House",
-            "2nd Mile Post Shop Complex", "Chandrasiri House", "MD Home Upper Stairs", "MD Home Shop",
-            "Haputhale Hotel", "2nd Mile Post Hostel", "Galaxy - A Hostel", "Galaxy - E Hostel",
-            "Pihillakade Housing Complex", "Vineethagama House",
-        ]
-        for entity in properties:
-            add("income", "Rental Income", f"{entity} Rent Income", entity=entity)
-        add("income", "Construction Projects Income", "Construction Project Receipt")
-
-        for name, service in [
-            ("Security Service Salary", "Security"), ("Security Service EPF 12%", "Security"),
-            ("Security Service ETF 3%", "Security"), ("Cleaning Service Salary", "Cleaning"),
-            ("Cleaning Service EPF 12%", "Cleaning"), ("Cleaning Service ETF 3%", "Cleaning"),
-        ]:
-            add("expense", "Direct Trade Expenditure", name, service)
-        operational = [
-            "Staff Salary Expenditure", "EPF (12%) Expenditure", "ETF (3%) Expenditure", "Office Expenditure",
-            "Printing & Stationery Expenditure", "Postage & Courier Expenditure",
-            "Travelling & Subsistence Expenditure", "Service Operation Expenditure",
-            "Vehicle Running & Maintenance Expenditure", "Security Items Expenditure",
-            "Cleaning Items & Materials Expenditure", "Training, Permit, Licence & Miscellaneous Expenditure",
-            "Tender Documents Expenditure", "Charity & Donation Expenditure",
-            "Marketing, Promotion, Subscription & Periodicals Expenditure", "Professional Fees Expenditure",
-            "Staff Training & Programme Expenditure", "Cleaning Service Other Expenditure",
-            "Electricity Charges Expenditure", "Water Supply Charges Expenditure",
-            "Telephone & Internet Charges Expenditure", "MD House Expenditure",
-            "Kottawa Prime Residence Expenditure", "Personal Insurance Premium Expenditure",
-            "Employees Insurance Premium Expenditure", "Vehicle & General Insurance Premium Expenditure",
-            "Financial / Loan & OD Interest Expenditure",
-        ]
-        for name in operational:
-            add("expense", "Operational Expenditure", name)
-        for entity in properties:
-            add("expense", "Maintenance Expenditure", f"{entity} Maintenance & Expenditure", entity=entity)
-        add("expense", "Construction Projects Expenditure", "Construction Project Payment")
-        investments = [
-            "WIP Velaudam Land Building Investment - Phase I", "WIP Velaudam Land Building Investment - Phase II",
-            "WIP Damanwara St. Bernard Tea Plantation Investment",
-            "WIP Damanwara St. Bernard Land Development Investment",
-            "WIP Galaxy A & E Hostel Building Investment", "WIP Pihillakade Housing Complex Investment",
-            "WIP Kandana Pepper Cultivation Investment",
-        ]
-        for name in investments:
-            add("expense", "Investment Projects Expenditure", name)
+        # New installations use the reviewed workbook catalog. Existing company
+        # databases are never silently recoded on application startup.
+        groups_by_code = {}
+        for kind, code, name in CATALOG_GROUPS:
+            group = Group(kind=kind, name=name)
+            db.session.add(group)
+            db.session.flush()
+            db.session.add(AuditLog(action='group_code', entity_type='group',
+                                    entity_id=group.id, details=str(int(code.split('_')[1]))))
+            groups_by_code[code] = group
+        for kind, group_code, code, name in CATALOG_PARTICULARS:
+            group = groups_by_code[group_code]
+            service = ('Security' if name.startswith('Security Service ') else
+                       'Cleaning' if name.startswith('Cleaning Service ') else None)
+            item = Category(kind=kind, group_id=group.id, group_name=group.name,
+                            name=name, service_line=service)
+            db.session.add(item)
+            db.session.flush()
+            db.session.add(AuditLog(action='account_code', entity_type='category',
+                                    entity_id=item.id, details=str(int(code.split('_')[1]))))
 
     # Link any particular that predates group IDs to its group.
     for cat in Category.query.filter(Category.group_id.is_(None)).all():
         cat.group_id = get_or_create_group(cat.kind, cat.group_name).id
-
-    # Apply new tax accounts to both fresh and existing company databases.
-    for kind, group_name in (("income", "Inward Taxes"), ("expense", "Tax Expenditure")):
-        existing_tax = Category.query.filter_by(kind=kind, name='SSCL').first()
-        if existing_tax:
-            group_name = existing_tax.group_name
-        get_or_create_group(kind, group_name)
-        for particular in ("SSCL", "VAT"):
-            if not Category.query.filter_by(kind=kind, group_name=group_name, name=particular).first():
-                create_category(kind, group_name, particular)
 
     db.session.commit()
 
