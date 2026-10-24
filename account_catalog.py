@@ -1,9 +1,10 @@
-"""Account chart supplied in Rearranged Particulars.xlsx (2026-10-23)."""
+"""Account chart from Rearranged Particulars and 2026.10.20 Particular List."""
 
 GROUPS = [
     ("income", "IG_0010", "Trade Income"),
     ("income", "IG_0020", "Bank Interest Income"),
     ("income", "IG_0030", "Property Rental Income"),
+    ("income", "IG_0035", "Other Income"),
     ("income", "IG_0040", "Construction Projects Income"),
     ("income", "IG_0050", "Inward Taxes"),
     ("expense", "EG_0010", "Direct Trade Expenditure"),
@@ -52,6 +53,11 @@ PARTICULARS = [
     ("income", "IG_0030", "IP_0640", "Other Rental Income 1"),
     ("expense", "EG_0020", "EP_1160", "Training, Permit, Licence & Miscellaneous Expenditure"),
     ("income", "IG_0030", "IP_0650", "Other Rental Income 2"),
+    ("income", "IG_0035", "IP_0900", "Other Income 1"),
+    ("income", "IG_0035", "IP_0901", "Other Income 2"),
+    ("income", "IG_0035", "IP_0902", "Other Income 3"),
+    ("income", "IG_0035", "IP_0903", "Other Income 4"),
+    ("income", "IG_0035", "IP_0904", "Other Income 5"),
     ("expense", "EG_0020", "EP_1170", "Tender Documents Expenditure"),
     ("expense", "EG_0020", "EP_1180", "Charity & Donation Expenditure"),
     ("income", "IG_0040", "IP_1000", "Construction Projects Receipts"),

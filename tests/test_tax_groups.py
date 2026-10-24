@@ -103,11 +103,11 @@ class SequentialIdTests(unittest.TestCase):
         with self.app.app_context():
             last_group = max(int(g.id[3:]) for g in Group.query.filter_by(kind="income").all())
             last_cat = max(int(c.id[3:]) for c in Category.query.filter_by(kind="income").all())
-        self.client.post("/groups", data={"csrf_token": self.csrf(), "kind": "income", "name": "Other Income"})
+        self.client.post("/groups", data={"csrf_token": self.csrf(), "kind": "income", "name": "Extra Income"})
         self.client.post("/categories", data={"csrf_token": self.csrf(), "kind": "income",
-                                              "group_name": "Other Income", "name": "Misc receipt"})
+                                              "group_name": "Extra Income", "name": "Misc receipt"})
         with self.app.app_context():
-            group = Group.query.filter_by(name="Other Income").one()
+            group = Group.query.filter_by(name="Extra Income").one()
             cat = Category.query.filter_by(name="Misc receipt").one()
             self.assertEqual(group.id, f"IG_{last_group + 100}")
             self.assertEqual(cat.id, f"IP_{last_cat + 10:04d}")

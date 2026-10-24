@@ -1,6 +1,6 @@
 # K.Y.S. Finance — account chart update (24 October 2026)
 
-The source chart is `Rearranged Particulars.xlsx`: 11 groups and 106 particulars. A new installation starts with this chart. An existing company installation keeps its database and must use the administrator's **Update account chart** page once after the application upgrade. That page previews all proposed changes, refuses an ambiguous or unmatched posted account, takes a verified database backup, and then relabels existing account records in one transaction. April transactions remain linked to the same internal records, so April reports show the revised names/codes without re-entry. Amounts and transaction count are checked before commit.
+The source chart is `Rearranged Particulars.xlsx` plus the five `Other Income` particulars in `2026.10.20 Particular List.xlsx` (`INCOME NEW!B24:E28`): 12 groups and 111 particulars. A new installation starts with this chart. An existing company installation keeps its database and must use the administrator's **Update account chart** page once after the application upgrade. That page previews all proposed changes, prefers the one posted duplicate (to retain historical entry links), otherwise the one active duplicate, and refuses genuinely ambiguous or unmatched posted accounts. It takes a verified database backup and relabels existing account records in one transaction. April transactions remain linked to the same internal records, so April reports show the revised names/codes without re-entry. Amounts and transaction count are checked before commit.
 
 ## Updating an existing company server
 
@@ -10,10 +10,14 @@ Do **not** run `KYS Finance Setup.exe` over a nonempty company folder. It is a f
 2. Stop the company server with its Stop shortcut; verify that port 5000 and `KYS Finance Server.exe` have stopped. If the shortcut fails, have an administrator stop the process before replacing program files. Never replace a running database or executable.
 3. From `release/company-win7/KYS Finance Server`, replace the **application** files in the existing server directory: `KYS Finance Server.exe`, `_internal`, scripts, client folder, icons, and documentation. Keep the existing `data`, `backups`, `restore-recovery`, `.secret_key`, `backup-target.txt`, `kys-install.json`, and installation markers untouched. If Windows refuses a file replacement, stop and resolve the running process; do not force deletion of company data.
 4. Run `Install Company Server.ps1 -AccountConfigured` from that same folder as administrator, or use the existing start shortcut and verify the server URL. Do not create a new administrator or new database.
-5. Sign in as an application administrator, open **Update account chart**, review the preview, then apply it once. If the page lists a posted account needing manual mapping (for example a duplicated or renamed `2700` account), stop there. Do not guess, delete, or merge that posted account. Confirm its intended workbook destination first.
+5. Sign in as an application administrator, open **Update account chart**, review the preview, then apply it once. If the page lists a posted account needing manual mapping, stop there. Do not guess, delete, or merge that posted account. Confirm its intended workbook destination first.
 6. Verify April P&L and ledger totals against the pre-update report, check a few account codes and entry counts, and have client users refresh/reopen the page. The client points to the same server; normally no client reinstall is needed for account-chart changes.
 
 If the upgrade fails, stop the server and restore the *entire pre-upgrade installation* and its matching database/secret key from the separate safety copy. Avoid restoring an older DB over newer entries. Keep backup files private.
+
+## April backup supplied for rehearsal
+
+The user-supplied database snapshot dated 23 October 2026 contained 103 April transactions and 107 transactions in all. A migration rehearsal on a separate private copy preserved both transaction counts and sums, and passed SQLite integrity and foreign-key checks. This does **not** mean the office server has been updated: its live database might contain newer entries. Do not restore this snapshot over a newer live database merely to install new code. Prefer the in-place update above, using the current live database and a fresh verified backup.
 
 ## Updating from home
 

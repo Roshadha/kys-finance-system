@@ -607,17 +607,31 @@ def account_catalog_plan():
     matched_groups, matched_particulars = set(), set()
     desired_groups, desired_particulars, changes, blocked = [], [], [], []
 
-    def find_match(items, kind, name, used):
+    def find_match(items, kind, name, used, desired_code, codes):
         labels = {name.casefold(), *(alias.casefold() for alias in CATALOG_ALIASES.get((kind, name), ()))}
         candidates = [item for item in items if item.kind == kind and item.name.strip().casefold() in labels
                       and item.id not in used]
         if len(candidates) > 1:
+            # A posted account must keep its internal ID so historical entries
+            # follow the new code. If neither copy is posted, retain the copy
+            # already carrying the requested code. Never guess between two
+            # posted copies or two equally plausible unused copies.
+            posted = [item for item in candidates if isinstance(item, Category) and item.id in posted_ids]
+            if len(posted) == 1:
+                return posted[0]
+            if not posted:
+                active = [item for item in candidates if item.active]
+                if len(active) == 1:
+                    return active[0]
+                exact_code = [item for item in candidates if codes[item.id] == int(desired_code.split('_')[1])]
+                if len(exact_code) == 1:
+                    return exact_code[0]
             blocked.append(f'Ambiguous match for {kind} / {name}. Review duplicate names first.')
             return None
         return candidates[0] if candidates else None
 
     for kind, code, name in CATALOG_GROUPS:
-        item = find_match(groups, kind, name, matched_groups)
+        item = find_match(groups, kind, name, matched_groups, code, current_group_codes)
         if item:
             matched_groups.add(item.id)
             before = format_id(GROUP_PREFIX[kind], current_group_codes[item.id], 4)
@@ -628,7 +642,7 @@ def account_catalog_plan():
         desired_groups.append((kind, code, name, item))
 
     for kind, group_code, code, name in CATALOG_PARTICULARS:
-        item = find_match(particulars, kind, name, matched_particulars)
+        item = find_match(particulars, kind, name, matched_particulars, code, current_particular_codes)
         if item:
             matched_particulars.add(item.id)
             before = format_id(CATEGORY_PREFIX[kind], current_particular_codes[item.id], 4)
@@ -693,7 +707,7 @@ def apply_account_catalog(plan):
         item.active = False
         audit('account_code', 'category', item.id, str(900000 + index))
     audit('catalog_sync', 'database', None,
-          f"Rearranged Particulars: {len(plan['groups'])} groups, {len(plan['particulars'])} particulars")
+          f"Account chart: {len(plan['groups'])} groups, {len(plan['particulars'])} particulars")
     db.session.flush()
 
 

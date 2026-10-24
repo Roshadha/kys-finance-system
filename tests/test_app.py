@@ -19,6 +19,13 @@ class FinanceAppTests(unittest.TestCase):
         with self.app.app_context():
             self.assertEqual(Group.query.count(), len(CATALOG_GROUPS))
             self.assertEqual(Category.query.count(), len(CATALOG_PARTICULARS))
+            self.assertEqual((len(CATALOG_GROUPS), len(CATALOG_PARTICULARS)), (12, 111))
+            other = Group.query.filter_by(kind='income', name='Other Income').one()
+            self.assertEqual(group_codes()[other.id], 35)
+            for code in range(900, 905):
+                item = Category.query.filter_by(kind='income', name=f'Other Income {code - 899}').one()
+                self.assertEqual(item.group_id, other.id)
+                self.assertEqual(particular_codes()[item.id], code)
             self.assertFalse(account_catalog_plan()['changes'])
             income = Category.query.filter_by(name='Security Service Income').one()
             income_id = income.id
@@ -64,6 +71,84 @@ class FinanceAppTests(unittest.TestCase):
         page = self.client.get('/accounts/rearrange')
         self.assertIn(b'Manual mapping required', page.data)
         self.assertNotIn(b'Back up and apply account chart', page.data)
+
+    def test_existing_april_database_gains_other_income_without_losing_entries(self):
+        self.login()
+        with self.app.app_context():
+            other = Group.query.filter_by(kind='income', name='Other Income').one()
+            for item in Category.query.filter_by(group_id=other.id).all():
+                db.session.delete(item)
+            db.session.delete(other)
+            posted = Category.query.filter_by(kind='income', name='Security Service Income').one()
+            db.session.add(Transaction(cash_date=date(2026, 4, 10), category_id=posted.id,
+                created_by_id=User.query.filter_by(username='admin').one().id,
+                reference='APR-OTHER-INCOME', counterparty='', subtotal=321, total=321))
+            db.session.commit()
+            posted_id = posted.id
+            plan = account_catalog_plan()
+            self.assertFalse(plan['blocked'])
+            self.assertEqual(sum(change.startswith('Add group:') for change in plan['changes']), 1)
+            self.assertEqual(sum(change.startswith('Add particular:') for change in plan['changes']), 5)
+            fingerprint = plan['fingerprint']
+        with patch('app.make_backup', return_value=(Path('verified-backup.db'), None, None)):
+            response = self.client.post('/accounts/rearrange', data={
+                'csrf_token': self.csrf(), 'fingerprint': fingerprint, 'confirmed': 'yes'})
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(Transaction.query.filter_by(reference='APR-OTHER-INCOME').one().category_id, posted_id)
+            self.assertEqual(Transaction.query.filter_by(reference='APR-OTHER-INCOME').one().total, 321)
+            self.assertEqual(Category.query.filter_by(group_name='Other Income').count(), 5)
+            self.assertEqual(account_catalog_plan()['changes'], [])
+
+    def test_duplicate_name_uses_posted_account_for_historical_report(self):
+        self.login()
+        with self.app.app_context():
+            original = Category.query.filter_by(kind='income', name='Security Service Income').one()
+            duplicate = Category(kind='income', group_id=original.group_id,
+                group_name=original.group_name, name=original.name, active=False)
+            db.session.add(duplicate)
+            db.session.flush()
+            db.session.add(AuditLog(action='account_code', entity_type='category',
+                                    entity_id=duplicate.id, details='9999'))
+            db.session.add(Transaction(cash_date=date(2026, 4, 11), category_id=duplicate.id,
+                created_by_id=User.query.filter_by(username='admin').one().id,
+                reference='APR-DUPLICATE', counterparty='', subtotal=654, total=654))
+            db.session.commit()
+            duplicate_id = duplicate.id
+            original_id = original.id
+            plan = account_catalog_plan()
+            self.assertFalse(plan['blocked'])
+            fingerprint = plan['fingerprint']
+        with patch('app.make_backup', return_value=(Path('verified-backup.db'), None, None)):
+            response = self.client.post('/accounts/rearrange', data={
+                'csrf_token': self.csrf(), 'fingerprint': fingerprint, 'confirmed': 'yes'})
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(Transaction.query.filter_by(reference='APR-DUPLICATE').one().category_id,
+                             duplicate_id)
+            self.assertEqual(particular_codes()[duplicate_id], 100)
+            self.assertFalse(db.session.get(Category, original_id).active)
+            report = build_report(date(2026, 4, 1), date(2026, 4, 30))
+            row = next(row for row in report['rows'] if row['Reference'] == 'APR-DUPLICATE')
+            self.assertEqual((row['Account Code'], row['Cash Total']), ('IP_0100', 654))
+            self.assertEqual(account_catalog_plan()['changes'], [])
+
+    def test_two_posted_duplicates_still_require_manual_mapping(self):
+        self.login()
+        with self.app.app_context():
+            original = Category.query.filter_by(kind='income', name='Security Service Income').one()
+            duplicate = Category(kind='income', group_id=original.group_id,
+                group_name=original.group_name, name=original.name)
+            db.session.add(duplicate)
+            db.session.flush()
+            user_id = User.query.filter_by(username='admin').one().id
+            for index, category in enumerate((original, duplicate), 1):
+                db.session.add(Transaction(cash_date=date(2026, 4, 12), category_id=category.id,
+                    created_by_id=user_id, reference=f'APR-AMBIGUOUS-{index}',
+                    counterparty='', subtotal=index, total=index))
+            db.session.commit()
+            plan = account_catalog_plan()
+            self.assertTrue(any('Ambiguous match' in issue for issue in plan['blocked']))
 
     def test_catalog_restates_april_report_without_reentering_transaction(self):
         self.login()
