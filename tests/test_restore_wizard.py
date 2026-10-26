@@ -10,6 +10,13 @@ from backup_restore import authenticate, inspect_backup, restore_database, migra
 
 
 class RestoreTests(unittest.TestCase):
+    def test_newer_backup_is_rejected_without_changing_live_data(self):
+        with closing(sqlite3.connect(str(self.backup))) as connection:
+            connection.execute('PRAGMA user_version=99')
+        with self.assertRaisesRegex(ValueError, 'newer'):
+            migrate_staged_backup(self.backup, self.live)
+        self.assertEqual(self.amount(self.live), 10)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -23,9 +23,9 @@
 
 Server installation එකේදී local backup ක්‍රමය ඇතුළත් වේ. වෙන PC එකක shared folder එකට පිටපතක් යැවීමට `Configure External Backup.cmd` හරහා ඒ folder path එක සකස් කළ යුතුයි. Server desktop එකේ **Stop KYS Finance Server** click කළ විට confirmation එකක් පෙන්වා, අලුත් verified backup එකක් ගෙන server එක නවත්වයි. Configured external folder එකක් තිබී එයට backup යැවීම අසාර්ථක වුණොත් server එක නවත්වන්නේ නැහැ. නැවත ආරම්භ කරන්න **KYS Finance Server** shortcut එක භාවිත කරන්න. Windows user නැවත sign in කළ විට auto-start ක්‍රියා කරයි.
 
-- Server process එක ආරම්භ වූ විට backup worker එක පටන් ගනී; පසුව පැය 2කට වරක් local snapshot එකක් ගනී.
-- Installed server folder එකේ `backups` යටතේ අලුත්ම local copies **60** තබයි; පැරණි ඒවා ඉවත් වේ.
-- External destination එක configure කරලා සහ available නම්, දවසේ පළමු successful automatic snapshot එක dated folder එකට පිටපත් වේ. එය එදා පසුව ඇතුළත් කරන data වලින් ස්වයංක්‍රීයව overwrite නොවේ.
+- Server ආරම්භයේ සහ default විනාඩි 15කට වරක් local backup ගනී. Adminගේ **Backups** page එකෙන් interval එක විනාඩි 5–1440 අතර වෙනස් කළ හැක.
+- `backups` තුළ පසුගිය දින 30ක copies සහ අලුත්ම copies 60 තබයි.
+- වෙන PC/shared folder destination එක configure කරලා available නම්, සෑම automatic backup එකකදීම එදින dated folder එක අලුත් data වලින් refresh වේ.
 - **Back up database** button එකෙන් වෙනම timestamp සහිත අලුත් external snapshot එකක් ලැබේ. ඒ නිසා දවසේ වැඩ අවසානයේ මේ button එක භාවිත කරන්න.
 - External copies දැනට ස්වයංක්‍රීයව මැකෙන්නේ නැහැ; drive එකේ free space පරීක්ෂා කරන්න.
 - Server off නම් backup worker එක run නොවේ. Scheduled failures server error log එකේ ලියවේ; manual backup එකේ external failure screen එකේත් පෙන්වයි.

@@ -13,6 +13,11 @@ __pycache__/
 .pytest_cache/
 data/
 backup-target.txt
+backup-settings.json
+backup-status.json
+server-tls.json
+*.pem
+*.key
 backups/*.db
 workbook_previews/
 node_modules/

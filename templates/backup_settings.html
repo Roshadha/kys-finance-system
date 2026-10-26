@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block page_title %}Backups{% endblock %}
+{% block content %}
+<section class="hero-row compact"><div><h1>Backup schedule and status</h1><p>Verified snapshots run while the server is on. The other PC receives each scheduled snapshot when its backup folder is available.</p></div></section>
+<article class="card form-card single">
+<p>Other PC backup: <strong>{{ 'Configured' if external_configured else 'Not configured — use Configure External Backup on the server' }}</strong></p>
+<p>Last local success (UTC): {{ status.last_local or 'No recorded backup yet' }}</p>
+<p>Last other PC success (UTC): {{ status.last_external or 'No recorded backup yet' }}</p>
+{% if status.local_error %}<div class="flash error">Local backup failed: {{ status.local_error }}</div>{% endif %}
+{% if status.external_error %}<div class="flash error">Other PC backup failed: {{ status.external_error }}</div>{% endif %}
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Backup interval (minutes)<input name="interval_minutes" type="number" min="5" max="1440" value="{{ settings.interval_minutes }}" required></label>
+<p>Minimum 5 minutes. Local snapshots are retained for at least 30 days and the latest 60 copies. External daily copies are refreshed at every successful backup.</p>
+<button class="btn primary" type="submit">Save schedule</button></form>
+<form action="{{ url_for('backup_now') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn secondary" type="submit">Back up now</button></form>
+</article>
+{% endblock %}

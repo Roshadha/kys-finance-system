@@ -30,6 +30,7 @@ from cheroot.wsgi import Server
 from discovery import start_discovery
 from lifecycle import DrainGate, monitor_shutdown, prevent_sleep
 from app import DATA_ROOT
+from server_security import tls_adapter
 
 if __name__ == '__main__':
     with app.app_context():
@@ -76,12 +77,17 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', '5000'))
     gate = DrainGate(app)
     server = Server((host, port), gate, numthreads=4)
+    adapter = tls_adapter(DATA_ROOT)
+    if adapter:
+        server.ssl_adapter = adapter
+        app.config['SESSION_COOKIE_SECURE'] = True
     discovery = None
     shutdown = monitor_shutdown(app, gate, DATA_ROOT, make_backup, server.stop)
     prevent_sleep(True)
     try:
         try:
-            discovery = start_discovery(port, bind_host=host)
+            if not adapter:
+                discovery = start_discovery(port, bind_host=host)
         except OSError as error:
             print('Discovery unavailable; direct server address remains available: ' + str(error), file=sys.stderr)
         server.start()

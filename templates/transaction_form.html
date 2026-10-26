@@ -4,6 +4,7 @@
 {% block content %}
 <section class="hero-row compact"><div><span class="eyebrow">{{ 'Money received' if kind == 'income' else 'Money paid' }}</span><h1>New {{ 'income' if kind == 'income' else 'expenditure' }}</h1><p>Choose the month these cash entries belong to. Your selection is remembered for the next entry.</p></div><a class="btn secondary" href="{{ url_for('transactions') }}">← Back to cash ledger</a></section>
 <form class="form-layout" method="post" id="transactionForm" data-period-url="{{ url_for('entry_period_save') }}">
+  <input type="hidden" name="submission_token" value="{{ submission_token }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="kind" value="{{ kind }}">
   <section class="card form-card"><div class="section-number">01</div><div class="section-content"><h2>Cash details</h2><p class="muted">Choose a group, its account, and the posting month. Monthly entries use the first day of that month.</p><div class="field-grid">
     <label class="span-2">Group<select name="group_name" id="transactionGroupSelect" required><option value="">Select a group</option>{% for name in categories|map(attribute='group_name')|unique %}<option value="{{ name }}" {{ 'selected' if request.form.get('group_name') == name }}>{{ group_labels[categories|selectattr('group_name','equalto',name)|map(attribute='group_id')|first] }} · {{ name }}</option>{% endfor %}</select></label>

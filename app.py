@@ -41,6 +41,8 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.schema import CreateIndex, CreateTable
 from werkzeug.security import check_password_hash, generate_password_hash
 from account_catalog import GROUPS as CATALOG_GROUPS, PARTICULARS as CATALOG_PARTICULARS
+from backup_settings import read_settings, save_settings, read_status, record_status
+from release_info import VERSION
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -82,6 +84,8 @@ SUBTOTAL_ONLY_GROUPS = {
 # without a match blocks the import so staff can choose its destination first.
 CATALOG_ALIASES = {
     ('income', 'Property Rental Income'): ('Rental Income',),
+    ('income', 'Welekade Shops Rental Income'): ('Welekade Shops Rent Income',),
+    ('income', 'Galaxy - A Hostel Rental Income'): ('Galaxy - A Hostel Rent Income',),
     ('expense', 'Property Maintenance Expenditure'): ('Maintenance Expenditure',),
     ('expense', 'Staff Training Programme Expenditure'): ('Staff Training & Programme Expenditure',),
     ('expense', 'Cleaning Items, Materials & Equipment Expenditure'):
@@ -257,122 +261,10 @@ def numeric_part(value):
 
 
 def migrate_integer_ids(engine, backup_directory=None):
-    """Atomically upgrade legacy IDs, preserving cash records and audit links."""
-    if engine.dialect.name != "sqlite":
-        return
-    db_path = engine.url.database
-    if not db_path or db_path == ":memory:" or not Path(db_path).exists():
-        return
-    con = sqlite3.connect(db_path, isolation_level=None, timeout=30)
-    migrated = False
-    try:
-        # Reserve the write lock before taking a snapshot or reading mapping data.
-        # A separate reader can still take a consistent SQLite backup (including WAL).
-        con.execute("BEGIN IMMEDIATE")
-        cols = {row[1]: (row[2] or "").upper() for row in con.execute("PRAGMA table_info(category)")}
-        if not cols or not (cols["id"].startswith("INT") or "code" in cols):
-            con.execute("ROLLBACK")
-            return
-        backup_dir = Path(backup_directory) if backup_directory else DATA_ROOT / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        backup_file = backup_dir / f"pre-code-migration-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
-        with closing(sqlite3.connect(db_path)) as source, closing(sqlite3.connect(backup_file)) as snapshot:
-            source.backup(snapshot)
-            if snapshot.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise RuntimeError("Migration backup failed validation; no accounts were changed.")
-
-        group_rows = con.execute('SELECT id, kind, name, active FROM "group"').fetchall()
-        rank = {key: i for i, key in enumerate(LEGACY_GROUP_ORDER)}
-        group_rows.sort(key=lambda r: (rank.get((r[1], r[2]), len(rank)), numeric_part(r[0])))
-        cat_rows = con.execute(
-            "SELECT id, kind, group_name, name, service_line, entity_name, active, code FROM category"
-        ).fetchall()
-        cat_rows.sort(key=lambda r: numeric_part(r[0]))
-
-        group_ids, old_group_ids, new_groups, counters = {}, {}, [], {}
-        def add_group(kind, name, active):
-            counters[kind] = counters.get(kind, 0) + 1
-            gid = format_id(GROUP_PREFIX[kind], counters[kind] * 100, 0)
-            group_ids[(kind, name)] = gid
-            new_groups.append((gid, kind, name, active))
-            return gid
-        for old_id, kind, name, active in group_rows:
-            old_group_ids[str(old_id)] = add_group(kind, name, active)
-        for _, kind, gname, *_rest in cat_rows:
-            if (kind, gname) not in group_ids:
-                add_group(kind, gname, 1)
-
-        cat_ids, legacy_codes, new_cats, counters = {}, {}, [], {}
-        for old_id, kind, gname, name, service, entity, active, code in cat_rows:
-            counters[kind] = counters.get(kind, 0) + 1
-            cid = format_id(CATEGORY_PREFIX[kind], counters[kind] * 10, 4)
-            cat_ids[str(old_id)] = cid
-            legacy_codes[str(old_id)] = code
-            new_cats.append((cid, group_ids[(kind, gname)], kind, gname, name, service, entity, active))
-
-        def read_table(name):
-            cursor = con.execute(f'SELECT * FROM "{name}"')
-            return [column[0] for column in cursor.description], cursor.fetchall()
-
-        txn_cols, txns = read_table("transaction")
-        audit_cols, audits = read_table("audit_log")
-        category_index = txn_cols.index("category_id")
-        converted_txns = []
-        for row in txns:
-            row = list(row)
-            row[category_index] = cat_ids[str(row[category_index])]
-            converted_txns.append(row)
-        entity_type_index = audit_cols.index("entity_type")
-        entity_id_index = audit_cols.index("entity_id")
-        converted_audits = []
-        for row in audits:
-            row = list(row)
-            value = row[entity_id_index]
-            mapping = {"category": cat_ids, "group": old_group_ids}.get(row[entity_type_index], {})
-            row[entity_id_index] = mapping.get(str(value), str(value)) if value is not None else None
-            converted_audits.append(row)
-
-        # All DDL and data changes participate in the same transaction. No user,
-        # vehicle or adjustment records are rebuilt.
-        for model in (Transaction, Category, Group, AuditLog):
-            con.execute(f'DROP TABLE "{model.__tablename__}"')
-        for model in (Group, Category, Transaction, AuditLog):
-            table = model.__table__
-            con.execute(str(CreateTable(table).compile(dialect=engine.dialect)))
-            for index in table.indexes:
-                con.execute(str(CreateIndex(index).compile(dialect=engine.dialect)))
-        con.executemany('INSERT INTO "group" (id, kind, name, active) VALUES (?,?,?,?)', new_groups)
-        con.executemany(
-            "INSERT INTO category (id, group_id, kind, group_name, name, service_line, entity_name, active) "
-            "VALUES (?,?,?,?,?,?,?,?)", new_cats)
-        for table_name, columns, rows in (
-                ("transaction", txn_cols, converted_txns), ("audit_log", audit_cols, converted_audits)):
-            marks = ",".join("?" * len(columns))
-            names = ",".join(f'"{column}"' for column in columns)
-            con.executemany(f'INSERT INTO "{table_name}" ({names}) VALUES ({marks})', rows)
-
-        # Keep old account codes as a historical cross-reference even though the
-        # UI now uses automatic IDs and no longer asks for a separate account code.
-        con.execute("CREATE TABLE account_code_migration ("
-                    "entity_type TEXT NOT NULL, old_id TEXT NOT NULL, new_id TEXT NOT NULL, "
-                    "legacy_code TEXT, PRIMARY KEY (entity_type, old_id))")
-        con.executemany("INSERT INTO account_code_migration VALUES (?,?,?,?)",
-                        [("group", old, new, None) for old, new in old_group_ids.items()] +
-                        [("category", old, new, legacy_codes[old]) for old, new in cat_ids.items()])
-        if con.execute("PRAGMA foreign_key_check").fetchone() is not None:
-            raise RuntimeError("Account migration found a broken data reference; changes were rolled back.")
-        if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise RuntimeError("Account migration failed integrity checks; changes were rolled back.")
-        con.execute("COMMIT")
-        migrated = True
-    except Exception:
-        if con.in_transaction:
-            con.execute("ROLLBACK")
-        raise
-    finally:
-        con.close()
-    if migrated:
-        engine.dispose()
+    from schema_migrations import migrate_legacy_ids
+    tables = {model.__tablename__: model.__table__ for model in (Group, Category, Transaction, AuditLog)}
+    return migrate_legacy_ids(engine, backup_directory or DATA_ROOT / 'backups', tables,
+                              LEGACY_GROUP_ORDER, create_table=CreateTable)
 
 
 def create_app(test_config=None):
@@ -413,6 +305,8 @@ def create_app(test_config=None):
                 finally:
                     cursor.close()
             with db.engine.connect() as connection:
+                if connection.exec_driver_sql('PRAGMA user_version').scalar() > 1:
+                    raise RuntimeError('Database requires a newer server. Do not downgrade this installation.')
                 connection.exec_driver_sql('PRAGMA journal_mode=WAL')
         migrate_integer_ids(db.engine, app.config.get("MIGRATION_BACKUP_DIR"))
         db.create_all()
@@ -437,6 +331,7 @@ def create_app(test_config=None):
             with db.engine.connect() as connection:
                 if connection.exec_driver_sql('PRAGMA foreign_key_check').first():
                     raise RuntimeError('Database has broken record links; restore a verified backup before starting.')
+                connection.exec_driver_sql('PRAGMA user_version=1')
             @event.listens_for(db.engine, 'connect')
             def sqlite_foreign_keys(connection, _record):
                 connection.execute('PRAGMA foreign_keys=ON')
@@ -577,13 +472,23 @@ def set_account_code(item, raw):
     raw = raw.strip().upper()
     if raw.startswith(prefix):
         raw = raw[len(prefix):]
-    if not raw.isdigit() or not 1 <= int(raw) <= 999999:
+    if not raw.isdigit() or not 1 <= int(raw) < 900000:
         raise ValueError('Enter a numeric code or a code with the correct account prefix.')
     model = Group if is_group else Category
     codes = group_codes() if is_group else particular_codes()
     if any(other.id != item.id and codes[other.id] == int(raw) for other in model.query.filter_by(kind=item.kind).all()):
         raise ValueError('That code is already used for this account type.')
     audit('group_code' if is_group else 'account_code', 'group' if is_group else 'category', item.id, str(int(raw)))
+
+
+def next_public_code(model, kind, exclude_id, step):
+    codes = group_codes() if model is Group else particular_codes()
+    values = [codes[item.id] for item in model.query.filter_by(kind=kind).all()
+              if item.id != exclude_id and codes[item.id] < 900000]
+    candidate = max([0] + values) + step
+    if candidate >= 900000:
+        raise ValueError('No automatic code available. Choose an unused code below 900000.')
+    return str(candidate)
 
 
 def sorted_groups(items):
@@ -597,7 +502,7 @@ def sorted_categories(items):
     return sorted(items, key=lambda c: (c.kind != 'income', codes.get(c.group_id, 0), particulars[c.id], c.id))
 
 
-def account_catalog_plan():
+def account_catalog_plan(retire_unused=False):
     """Plan a non-destructive chart update against the current database."""
     groups = Group.query.all()
     particulars = Category.query.all()
@@ -654,19 +559,32 @@ def account_catalog_plan():
         desired_particulars.append((kind, group_code, code, name, item))
 
     unmatched_particulars = [item for item in particulars if item.id not in matched_particulars]
-    legacy_particulars = [item for item in unmatched_particulars
+    legacy_particulars = [item for item in unmatched_particulars if retire_unused
                           if item.active or current_particular_codes[item.id] < 900000]
     for item in unmatched_particulars:
-        if item.id in posted_ids:
+        if retire_unused and item.id in posted_ids:
             blocked.append(f'Posted account needs manual mapping: {item.id} · {item.name}')
         elif item in legacy_particulars:
             changes.append(f'Hide unused old particular: {item.name}')
-    legacy_groups = [item for item in groups if item.id not in matched_groups
+    legacy_groups = [item for item in groups if retire_unused and item.id not in matched_groups
+                     and not any(c.group_id == item.id and c.id in matched_particulars for c in particulars)
                      and (item.active or current_group_codes[item.id] < 900000)]
     for item in legacy_groups:
         changes.append(f'Hide old group: {item.name}')
 
+    # Custom accounts are retained by default. Never silently steal their codes.
+    for desired, existing, matched, retired, codes in (
+        ([(k, c) for k, c, _, _ in desired_groups], groups, matched_groups, legacy_groups, current_group_codes),
+        ([(k, c) for k, _, c, _, _ in desired_particulars], particulars, matched_particulars, legacy_particulars, current_particular_codes),
+    ):
+        wanted = {(kind, int(code.split('_')[1])) for kind, code in desired}
+        retired_ids = {item.id for item in retired}
+        for item in existing:
+            if item.id not in matched and item.id not in retired_ids and (item.kind, codes[item.id]) in wanted:
+                blocked.append(f'Code conflict with retained account: {item.name}. Edit its code or explicitly review retiring unused legacy accounts.')
+
     snapshot = {
+        'retire_unused': retire_unused,
         'groups': sorted((g.id, g.kind, g.name, g.active, current_group_codes[g.id]) for g in groups),
         'particulars': sorted((c.id, c.kind, c.group_id, c.name, c.active,
                                current_particular_codes[c.id]) for c in particulars),
@@ -675,6 +593,7 @@ def account_catalog_plan():
     }
     fingerprint = hashlib.sha256(json.dumps(snapshot, default=str).encode()).hexdigest()
     return {'groups': desired_groups, 'particulars': desired_particulars,
+            'retire_unused': retire_unused,
             'legacy_groups': legacy_groups, 'legacy_particulars': legacy_particulars,
             'changes': changes, 'blocked': blocked, 'fingerprint': fingerprint}
 
@@ -700,12 +619,14 @@ def apply_account_catalog(plan):
         audit('account_code', 'category', item.id, str(int(code.split('_')[1])))
     # Unused legacy accounts remain in audit/history but cannot be chosen for
     # new entries. Their reserved codes cannot collide with workbook codes.
+    reserved_group = max([900000] + list(group_codes().values()))
+    reserved_particular = max([900000] + list(particular_codes().values()))
     for index, item in enumerate(plan['legacy_groups'], 1):
         item.active = False
-        audit('group_code', 'group', item.id, str(900000 + index))
+        audit('group_code', 'group', item.id, str(reserved_group + index))
     for index, item in enumerate(plan['legacy_particulars'], 1):
         item.active = False
-        audit('account_code', 'category', item.id, str(900000 + index))
+        audit('account_code', 'category', item.id, str(reserved_particular + index))
     audit('catalog_sync', 'database', None,
           f"Account chart: {len(plan['groups'])} groups, {len(plan['particulars'])} particulars")
     db.session.flush()
@@ -1024,6 +945,8 @@ def register_context(app):
         gc, pc = group_codes(), particular_codes()
         return {
             "current_user": current_user(), "TASKS": TASKS, "ROLES": ROLES,
+            "app_version": VERSION,
+            "backup_status": read_status(DATA_ROOT) if current_user() and current_user().role == 'admin' else {},
             "today": date.today(), "csrf_token": session.get("csrf_token", ""),
             "entry_period": remembered_entry_period(),
             "live_revision": getattr(g, "live_revision", None),
@@ -1092,7 +1015,7 @@ def register_routes(app):
     @app.get("/health")
     def health():
         db.session.execute(text('SELECT 1'))
-        return {"status": "ok", "database": "connected", "service": "kys-finance"}
+        return {"status": "ok", "database": "connected", "service": "kys-finance", "version": VERSION}
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -1224,6 +1147,21 @@ def register_routes(app):
         if request.method == "POST":
             try:
                 category = db.session.get(Category, request.form.get("category_id", "").strip())
+                submission = request.form.get('submission_token', '')
+                if len(submission) != 32 or any(c not in '0123456789abcdef' for c in submission):
+                    abort(400, 'Refresh the entry form before saving.')
+                payload = {key: request.form.getlist(key) for key in sorted(request.form)
+                           if key not in {'csrf_token', 'submission_token'}}
+                payload['requested_kind'] = requested_kind
+                digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+                saved = AuditLog.query.filter_by(action='entry_submission', entity_type='submission',
+                                                entity_id=submission).first()
+                if saved:
+                    previous = json.loads(saved.details)
+                    if saved.user_id != current_user().id or previous['digest'] != digest:
+                        abort(409, 'This save token was already used. Open a new entry form.')
+                    flash('This entry was already saved. No duplicate was added.', 'success')
+                    return redirect(url_for('transaction_new', kind=requested_kind))
                 selected_group = request.form.get("group_name", "").strip()
                 if not selected_group:
                     raise ValueError("Select a group.")
@@ -1256,6 +1194,8 @@ def register_routes(app):
                 db.session.add(item)
                 db.session.flush()
                 audit("create", "transaction", item.id, f"{requested_kind} {total:.2f} / {reference}")
+                audit('entry_submission', 'submission', submission,
+                      json.dumps({'digest': digest, 'transaction_id': item.id}))
                 remember_entry_period(cash_date.replace(day=1))
                 db.session.commit()
                 flash(f"Cash {requested_kind} saved. The ledger entry is now locked.", "success")
@@ -1268,6 +1208,7 @@ def register_routes(app):
         if requested_kind == 'expense':
             subtotal_only_groups.update(c.group_name for c in categories)
         return render_template("transaction_form.html", kind=requested_kind, categories=categories,
+                               submission_token=request.form.get('submission_token') or secrets.token_hex(16),
                                subtotal_only_groups=subtotal_only_groups)
 
     @app.route('/transactions/<int:transaction_id>/delete', methods=['GET', 'POST'])
@@ -1551,7 +1492,7 @@ def register_routes(app):
                 raw_code = request.form.get('code', '').strip().upper()
                 if raw_code in {'', CATEGORY_PREFIX[kind] + '_0'}:
                     codes = particular_codes()
-                    raw_code = str(max([0] + [codes[c.id] for c in Category.query.filter_by(kind=kind).all() if c.id != item.id]) + 100)
+                    raw_code = next_public_code(Category, kind, item.id, 100)
                 set_account_code(item, raw_code)
                 audit("create", "category", item.id, f"{kind}: {name}")
                 db.session.commit()
@@ -1657,7 +1598,7 @@ def register_routes(app):
                 code = request.form.get('code', '').strip().upper()
                 if code in {'', GROUP_PREFIX[kind] + '_0'}:
                     codes = group_codes()
-                    code = str(max([0] + [codes[g.id] for g in Group.query.filter_by(kind=kind).all() if g.id != item.id]) + 10)
+                    code = next_public_code(Group, kind, item.id, 10)
                 set_account_code(item, code)
                 audit("create", "group", item.id, f"{kind}: {name}")
                 db.session.commit()
@@ -1730,7 +1671,8 @@ def register_routes(app):
     @app.route('/accounts/rearrange', methods=['GET', 'POST'])
     @role_required('admin')
     def account_rearrange():
-        plan = account_catalog_plan()
+        retire_unused = request.values.get('retire_unused') == 'yes'
+        plan = account_catalog_plan(retire_unused=retire_unused)
         if request.method == 'POST':
             if plan['blocked'] or request.form.get('fingerprint') != plan['fingerprint']:
                 flash('Account list changed or needs manual mapping. Review the preview again.', 'error')
@@ -1746,7 +1688,7 @@ def register_routes(app):
                 db.session.rollback()
                 if db.engine.dialect.name == 'sqlite':
                     db.session.execute(text('BEGIN IMMEDIATE'))
-                plan = account_catalog_plan()
+                plan = account_catalog_plan(retire_unused=retire_unused)
                 if plan['blocked'] or request.form['fingerprint'] != plan['fingerprint']:
                     raise ValueError('Account list changed during backup. Nothing was updated; review again.')
                 before = db.session.query(func.count(Transaction.id), func.sum(Transaction.total)).one()
@@ -1783,6 +1725,22 @@ def register_routes(app):
         else:
             flash(f"Local backup created: {path.name}. Configure an external backup for disaster recovery.", "success")
         return redirect(url_for("dashboard"))
+
+    @app.route('/backup/settings', methods=['GET', 'POST'])
+    @role_required('admin')
+    def backup_preferences():
+        if request.method == 'POST':
+            try:
+                save_settings(DATA_ROOT, request.form.get('interval_minutes', ''))
+                audit('backup_settings', 'database', None, 'Backup interval changed')
+                db.session.commit()
+                flash('Backup schedule saved.', 'success')
+                return redirect(url_for('backup_preferences'))
+            except (ValueError, OSError) as error:
+                flash(str(error), 'error')
+        return render_template('backup_settings.html', settings=read_settings(DATA_ROOT),
+                               status=read_status(DATA_ROOT),
+                               external_configured=(DATA_ROOT / 'backup-target.txt').exists())
 
     @app.route("/account/password", methods=["GET", "POST"])
     @role_required("admin")
@@ -1829,8 +1787,10 @@ def make_backup(app, force_external=False, local_only=False):
             raise RuntimeError("SQLite backup integrity check failed.")
     temporary.replace(destination)
     backups = sorted(destination.parent.glob("kys_finance_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    cutoff = time.time() - 30 * 24 * 60 * 60
     for old in backups[60:]:
-        old.unlink(missing_ok=True)
+        if old.stat().st_mtime < cutoff:
+            old.unlink(missing_ok=True)
     external_path = None
     external_error = None
     if not local_only and (DATA_ROOT / "backup-target.txt").exists():
@@ -1839,6 +1799,8 @@ def make_backup(app, force_external=False, local_only=False):
         except (OSError, RuntimeError, sqlite3.DatabaseError) as exc:
             external_error = str(exc)
             app.logger.exception("External backup failed; local backup remains available")
+    record_status(DATA_ROOT, local=destination, external=external_path, error=external_error,
+                  external_attempted=not local_only and (DATA_ROOT / 'backup-target.txt').exists())
     return destination, external_path, external_error
 
 
@@ -1869,12 +1831,19 @@ def start_backup_worker(app):
     app._backup_started = True
 
     def worker():
+        last_attempt = 0
         while True:
-            try:
-                make_backup(app)
-            except Exception:
-                app.logger.exception("Scheduled backup failed")
-            time.sleep(2 * 60 * 60)
+            if time.monotonic() - last_attempt >= read_settings(DATA_ROOT)['interval_minutes'] * 60 or not last_attempt:
+                try:
+                    make_backup(app)
+                except Exception as error:
+                    app.logger.exception("Scheduled backup failed")
+                    try:
+                        record_status(DATA_ROOT, local_error=str(error))
+                    except OSError:
+                        app.logger.exception('Could not record backup failure')
+                last_attempt = time.monotonic()
+            time.sleep(5)
 
     threading.Thread(target=worker, daemon=True, name="sqlite-backup").start()
 

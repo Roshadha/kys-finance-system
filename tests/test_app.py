@@ -1,3 +1,4 @@
+import secrets
 import os
 import unittest
 from datetime import date
@@ -67,8 +68,8 @@ class FinanceAppTests(unittest.TestCase):
                 created_by_id=User.query.filter_by(username='admin').one().id,
                 reference='UNMAPPED', counterparty='', subtotal=1, total=1))
             db.session.commit()
-            self.assertTrue(any('manual mapping' in message for message in account_catalog_plan()['blocked']))
-        page = self.client.get('/accounts/rearrange')
+            self.assertTrue(any('manual mapping' in message for message in account_catalog_plan(retire_unused=True)['blocked']))
+        page = self.client.get('/accounts/rearrange?retire_unused=yes')
         self.assertIn(b'Manual mapping required', page.data)
         self.assertNotIn(b'Back up and apply account chart', page.data)
 
@@ -100,6 +101,39 @@ class FinanceAppTests(unittest.TestCase):
             self.assertEqual(Category.query.filter_by(group_name='Other Income').count(), 5)
             self.assertEqual(account_catalog_plan()['changes'], [])
 
+    def test_legacy_rent_names_keep_posted_entries_during_catalog_update(self):
+        self.login()
+        with self.app.app_context():
+            cases = (
+                ('Welekade Shops Rental Income', 'Welekade Shops Rent Income', 520, 1000),
+                ('Galaxy - A Hostel Rental Income', 'Galaxy - A Hostel Rent Income', 600, 5000),
+            )
+            original_ids = {}
+            user_id = User.query.filter_by(username='admin').one().id
+            for index, (target_name, old_name, _, amount) in enumerate(cases, 1):
+                item = Category.query.filter_by(kind='income', name=target_name).one()
+                original_ids[target_name] = item.id
+                item.name = old_name
+                db.session.add(Transaction(cash_date=date(2026, 4, 10), category_id=item.id,
+                    created_by_id=user_id, reference=f'APR-RENT-{index}',
+                    counterparty='', subtotal=amount, total=amount))
+            db.session.commit()
+            plan = account_catalog_plan()
+            self.assertFalse(plan['blocked'])
+            fingerprint = plan['fingerprint']
+        with patch('app.make_backup', return_value=(Path('verified-backup.db'), None, None)):
+            response = self.client.post('/accounts/rearrange', data={
+                'csrf_token': self.csrf(), 'fingerprint': fingerprint, 'confirmed': 'yes'})
+        self.assertEqual(response.status_code, 302)
+        with self.app.app_context():
+            for index, (target_name, _, code, amount) in enumerate(cases, 1):
+                entry = Transaction.query.filter_by(reference=f'APR-RENT-{index}').one()
+                self.assertEqual((entry.category_id, entry.total),
+                                 (original_ids[target_name], amount))
+                self.assertEqual(particular_codes()[entry.category_id], code)
+                self.assertEqual(db.session.get(Category, entry.category_id).name, target_name)
+            self.assertFalse(account_catalog_plan()['changes'])
+
     def test_duplicate_name_uses_posted_account_for_historical_report(self):
         self.login()
         with self.app.app_context():
@@ -116,12 +150,12 @@ class FinanceAppTests(unittest.TestCase):
             db.session.commit()
             duplicate_id = duplicate.id
             original_id = original.id
-            plan = account_catalog_plan()
+            plan = account_catalog_plan(retire_unused=True)
             self.assertFalse(plan['blocked'])
             fingerprint = plan['fingerprint']
         with patch('app.make_backup', return_value=(Path('verified-backup.db'), None, None)):
             response = self.client.post('/accounts/rearrange', data={
-                'csrf_token': self.csrf(), 'fingerprint': fingerprint, 'confirmed': 'yes'})
+                'csrf_token': self.csrf(), 'retire_unused': 'yes', 'fingerprint': fingerprint, 'confirmed': 'yes'})
         self.assertEqual(response.status_code, 302)
         with self.app.app_context():
             self.assertEqual(Transaction.query.filter_by(reference='APR-DUPLICATE').one().category_id,
@@ -131,7 +165,7 @@ class FinanceAppTests(unittest.TestCase):
             report = build_report(date(2026, 4, 1), date(2026, 4, 30))
             row = next(row for row in report['rows'] if row['Reference'] == 'APR-DUPLICATE')
             self.assertEqual((row['Account Code'], row['Cash Total']), ('IP_0100', 654))
-            self.assertEqual(account_catalog_plan()['changes'], [])
+            self.assertEqual(account_catalog_plan(retire_unused=True)['changes'], [])
 
     def test_two_posted_duplicates_still_require_manual_mapping(self):
         self.login()
@@ -334,7 +368,7 @@ class FinanceAppTests(unittest.TestCase):
             category = Category.query.filter_by(name='Security Service Income').one()
             category_id, group_name = category.id, category.group_name
         result = self.client.post('/transactions/new?kind=income', data={
-            'csrf_token': self.csrf(), 'category_id': category_id, 'group_name': group_name,
+            'submission_token': secrets.token_hex(16), 'csrf_token': self.csrf(), 'category_id': category_id, 'group_name': group_name,
             'month_number': '10', 'year': '2026', 'subtotal': '125', 'reference': 'LIVE-TEST'})
         self.assertEqual(result.status_code, 302)
         changed = reader.get('/updates/version').json['version']
@@ -502,7 +536,7 @@ class FinanceAppTests(unittest.TestCase):
         with self.app.app_context():
             cat = Category.query.filter_by(name='Office Expenditure').one()
             cid, group = cat.id, cat.group_name
-        fields = dict(csrf_token=self.csrf(), kind='expense', category_id=cid,
+        fields = dict(submission_token=secrets.token_hex(16), csrf_token=self.csrf(), kind='expense', category_id=cid,
                       group_name=group, month_number='2', year='2024', subtotal='8000')
         response = self.client.post('/transactions/new?kind=expense', data=fields, follow_redirects=True)
         self.assertEqual(response.status_code, 200)
@@ -518,7 +552,7 @@ class FinanceAppTests(unittest.TestCase):
 
     def test_selected_entry_month_persists_without_posting_and_across_login(self):
         self.login()
-        fields = dict(csrf_token=self.csrf(), month_number='2', year='2024')
+        fields = dict(submission_token=secrets.token_hex(16), csrf_token=self.csrf(), month_number='2', year='2024')
         self.assertEqual(self.client.post('/account/entry-period', data=fields).status_code, 200)
         self.assertEqual(self.client.post('/account/entry-period', data=fields).status_code, 200)
         with self.app.app_context():
@@ -700,7 +734,7 @@ class FinanceAppTests(unittest.TestCase):
             self.assertEqual(Category.query.filter_by(kind='income',name='Security Service Inward SSCL').count(),1)
         self.client.post(f'/groups/{gid}/toggle', data={'csrf_token':self.csrf()})
         self.assertNotIn(cid.encode(), self.client.get('/transactions/new?kind=income').data)
-        self.client.post('/transactions/new?kind=income', data={'csrf_token':self.csrf(), 'category_id':cid,
+        self.client.post('/transactions/new?kind=income', data={'submission_token': secrets.token_hex(16), 'csrf_token':self.csrf(), 'category_id':cid,
             'group_name':'Taxes received','year':'2024','month_number':'2','subtotal':'100'})
         with self.app.app_context():
             self.assertEqual(Transaction.query.count(),0)
@@ -790,7 +824,7 @@ class FinanceAppTests(unittest.TestCase):
         page = self.client.get(path)
         self.assertIn(b'value="12,000.00"', page.data)
         self.assertIn(b'Save changes', page.data)
-        fields = dict(csrf_token=self.csrf(), version='0', total='10,000.00', reason='Correct amount')
+        fields = dict(submission_token=secrets.token_hex(16), csrf_token=self.csrf(), version='0', total='10,000.00', reason='Correct amount')
         result = self.client.post(path, data=fields)
         self.assertEqual(result.status_code, 302)
         self.assertIn('month_number=2', result.location)
@@ -833,7 +867,7 @@ class FinanceAppTests(unittest.TestCase):
         with self.app.app_context():
             category_id = Category.query.filter_by(kind="income", name="Security Service Income").first().id
         response = self.client.post("/transactions/new?kind=income", data={
-            "csrf_token": self.csrf(), "kind": "income", "group_name": "Trade Income", "category_id": category_id,
+            "submission_token": secrets.token_hex(16), "csrf_token": self.csrf(), "kind": "income", "group_name": "Trade Income", "category_id": category_id,
             "cash_date": date.today().isoformat(), "reference": "TEST-001",
             "counterparty": "Test Customer", "description": "Cash receipt",
             "subtotal": "100000",
@@ -1013,7 +1047,7 @@ class FinanceAppTests(unittest.TestCase):
             self.assertIn(b'transactionGroupSelect', page.data)
             self.assertIn(b'data-group=', page.data)
             response = self.client.post(f"/transactions/new?kind={kind}", data={
-                "csrf_token": self.csrf(), "kind": kind, "group_name": group,
+                "submission_token": secrets.token_hex(16), "csrf_token": self.csrf(), "kind": kind, "group_name": group,
                 "category_id": account_id, "cash_date": date.today().isoformat(),
                 "reference": "", "counterparty": "", "subtotal": "125.00",
             })
@@ -1021,7 +1055,7 @@ class FinanceAppTests(unittest.TestCase):
         with self.app.app_context():
             self.assertEqual(Transaction.query.filter_by(reference="", counterparty="").count(), 2)
         mismatch = self.client.post("/transactions/new?kind=income", data={
-            "csrf_token": self.csrf(), "kind": "income", "group_name": "Rental Income",
+            "submission_token": secrets.token_hex(16), "csrf_token": self.csrf(), "kind": "income", "group_name": "Rental Income",
             "category_id": account_ids[0][2], "cash_date": date.today().isoformat(),
             "subtotal": "125.00",
         })
@@ -1037,7 +1071,7 @@ class FinanceAppTests(unittest.TestCase):
         self.assertIn(b'placeholder="0.00"', page.data)
         self.assertNotIn(b'value="0.00"', page.data)
         response = self.client.post("/transactions/new?kind=expense", data={
-            "csrf_token": self.csrf(), "kind": "expense", "group_name": group_name,
+            "submission_token": secrets.token_hex(16), "csrf_token": self.csrf(), "kind": "expense", "group_name": group_name,
             "category_id": category_id, "cash_date": date.today().isoformat(),
             "subtotal": "500,000.00",
         })

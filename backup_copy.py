@@ -21,13 +21,6 @@ def copy_snapshot(root, snapshot, force=False):
     day = stamp.strftime('%Y-%m-%d')
     destination = target / 'KYS-Finance-Backups' / (stamp.strftime('%Y-%m-%d_%H%M%S_%f') if force else day)
     manifest_path = destination / 'backup-complete.txt'
-    if not force and manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-            if (destination / '.secret_key').exists() and digest(destination / 'kys_finance.db') == manifest['sha256']:
-                return destination
-        except (ValueError, KeyError, OSError):
-            pass
     destination.mkdir(parents=True, exist_ok=True)
     temporary = destination / ('snapshot-{}.tmp'.format(os.getpid()))
     shutil.copy2(str(snapshot), str(temporary))

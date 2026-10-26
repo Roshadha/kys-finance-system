@@ -1,3 +1,4 @@
+import secrets
 import json
 import unittest
 from datetime import date
@@ -36,7 +37,7 @@ class TaxGroupTests(unittest.TestCase):
         self.assertIn(b'Inward Taxes', page.data)
         day = date.today().isoformat()
         invalid = self.client.post("/transactions/new?kind=income", data={
-            "csrf_token": self.csrf(), "kind": "income", "group_name": "Trade Income",
+            "submission_token": secrets.token_hex(16), "csrf_token": self.csrf(), "kind": "income", "group_name": "Trade Income",
             "category_id": ids[0], "cash_date": day, "subtotal": "1000", "vat": "150",
         })
         self.assertEqual(invalid.status_code, 200)
@@ -47,7 +48,7 @@ class TaxGroupTests(unittest.TestCase):
                 ("income", "Inward Taxes", ids[1], "150"),
                 ("expense", "Outward Taxes", ids[2], "80")):
             response = self.client.post(f"/transactions/new?kind={kind}", data={
-                "csrf_token": self.csrf(), "kind": kind, "group_name": group,
+                "submission_token": secrets.token_hex(16), "csrf_token": self.csrf(), "kind": kind, "group_name": group,
                 "category_id": category_id, "cash_date": day, "subtotal": amount,
             })
             self.assertEqual(response.status_code, 302)

@@ -32,7 +32,7 @@ Change all temporary passwords immediately from the settings icon after signing 
 - Saved ledger entries cannot be edited or deleted.
 - Administrators correct entries through signed adjustments, preserving the original.
 - Every sign-in, entry, adjustment, user change, export, and backup is written to audit history.
-- Verified SQLite backups run when the server starts and every two hours while it is running. Administrators can create an immediate backup from the dashboard. A configured external drive/NAS receives a daily second copy for disaster recovery.
+- Verified SQLite backups run at startup and every 15 minutes by default. Administrators can change the interval (5–1440 minutes), inspect backup status under Backups, and create an immediate backup. A configured second-PC/shared-folder destination is refreshed on each backup.
 - Monthly and short summary reports can be filtered by income and expenditure groups and exported to Excel.
 
 ## Configuration

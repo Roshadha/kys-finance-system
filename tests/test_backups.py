@@ -52,9 +52,14 @@ class BackupTests(unittest.TestCase):
         with closing(sqlite3.connect(offsite / "kys_finance.db")) as connection:
             self.assertEqual(connection.execute("SELECT amount FROM receipts").fetchone()[0], 1250)
 
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute('INSERT INTO receipts VALUES (500)')
+            connection.commit()
         _, same_day, error = finance_app.make_backup(self.app)
         self.assertIsNone(error)
         self.assertEqual(same_day, offsite)
+        with closing(sqlite3.connect(same_day / 'kys_finance.db')) as connection:
+            self.assertEqual(connection.execute('SELECT SUM(amount) FROM receipts').fetchone()[0], 1750)
 
         _, manual, error = finance_app.make_backup(self.app, force_external=True)
         self.assertIsNone(error)

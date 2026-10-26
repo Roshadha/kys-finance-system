@@ -1,5 +1,6 @@
 """Isolated source-level checks; not a substitute for company LAN/PC testing."""
 import io
+import secrets
 import re
 import tempfile
 import threading
@@ -49,7 +50,7 @@ class HandoverTests(unittest.TestCase):
                     token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
                     barrier.wait(timeout=30)
                     for number in range(3):
-                        request('/transactions/new?kind=income', {'csrf_token': token, 'kind': 'income',
+                        request('/transactions/new?kind=income', {'submission_token': secrets.token_hex(16), 'csrf_token': token, 'kind': 'income',
                             'group_name': 'Trade Income', 'category_id': category, 'cash_date': '2026-10-10',
                             'reference': 'CONCURRENT-{}-{}'.format(index, number), 'subtotal': '100'})
                     return request('/reports?type=monthly&start=2026-10-10&end=2026-10-10')

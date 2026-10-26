@@ -8,6 +8,13 @@
 </div></section>
 <article class="card form-card single">
   <h2>Review before applying</h2>
+  {% if plan.retire_unused %}
+  <p class="flash error">You selected legacy cleanup. Review every proposed hidden account below. Posted unmatched accounts block this action.</p>
+  <a href="{{ url_for('account_rearrange') }}">Keep custom accounts instead</a>
+  {% else %}
+  <p>Your custom groups and particulars will be kept. Conflicting codes must be resolved before applying.</p>
+  <a href="{{ url_for('account_rearrange', retire_unused='yes') }}">Preview retiring unused legacy accounts</a>
+  {% endif %}
   <p>Ask everyone to finish saving entries. This action takes a verified database backup first. If an external backup destination is configured, that copy must succeed too. Do not replace or upload the database file.</p>
   {% if plan.blocked %}
     <div class="flash error"><strong>Manual mapping required; no changes can be applied yet.</strong>
@@ -22,6 +29,7 @@
   <form method="post">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="fingerprint" value="{{ plan.fingerprint }}">
+    <input type="hidden" name="retire_unused" value="{{ 'yes' if plan.retire_unused else 'no' }}">
     <label><input type="checkbox" name="confirmed" value="yes" required> I reviewed the changes and asked staff to finish saving.</label>
     <button class="btn primary" type="submit">Back up and apply account chart</button>
   </form>

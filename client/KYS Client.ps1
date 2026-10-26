@@ -35,11 +35,14 @@ function New-KysShortcut([string]$ShortcutDirectory = [Environment]::GetFolderPa
     $link.Save()
 }
 
-function Test-KysServer([string]$Address, [int]$Port) {
+function Test-KysServer([string]$Address, [int]$Port, [string]$Scheme = "http") {
     if ($Address -notmatch '^[A-Za-z0-9.-]+$' -or $Port -lt 1 -or $Port -gt 65535) { return $false }
+    if (-not $Scheme) { $Scheme = "http" }
+    if ($Scheme -ne "http" -and $Scheme -ne "https") { return $false }
     $response = $null
     try {
-        $request = [Net.HttpWebRequest]::Create("http://${Address}:${Port}/health")
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]3072
+        $request = [Net.HttpWebRequest]::Create("${Scheme}://${Address}:${Port}/health")
         $request.Proxy = $null
         $request.Timeout = 1500
         $request.ReadWriteTimeout = 1500
@@ -135,7 +138,7 @@ if ($Mode -eq 'Monitor') {
             try {
                 $saved = Get-KysSavedServer
                 $server = Select-KysServer @(Find-KysServers) $saved
-                if ($saved -and $saved.manual -and (Test-KysServer $saved.address $saved.port)) { $server = $saved }
+                if ($saved -and $saved.manual -and (Test-KysServer $saved.address $saved.port $saved.scheme)) { $server = $saved }
                 if ($server) { Save-KysServer $server; New-KysShortcut; break }
             } catch { }
             Start-Sleep -Seconds 30
@@ -149,7 +152,7 @@ try {
     $saved = Get-KysSavedServer
     $servers = @(Find-KysServers)
     $server = Select-KysServer $servers $saved
-    if ($saved -and $saved.manual -and (Test-KysServer $saved.address $saved.port)) { $server = $saved }
+    if ($saved -and $saved.manual -and (Test-KysServer $saved.address $saved.port $saved.scheme)) { $server = $saved }
     while (-not $server) {
         if ($servers.Count -gt 0) {
             Write-Host 'Choose the company server:'
@@ -167,12 +170,20 @@ try {
             continue
         }
         if ($choice -eq 'M') {
-            $address = Read-Host 'Server LAN IP or computer name (without http://)'
-            $portText = Read-Host 'Port (Enter for 5000)'
-            $port = 5000
+            $address = Read-Host 'Server LAN IP, computer name, or full HTTPS URL'
+            $scheme = 'http'
+            $securePort = 5000
+            if ($address -match '^https://') {
+                $uri = [Uri]$address
+                $scheme = 'https'
+                $securePort = $uri.Port
+                $address = $uri.DnsSafeHost
+            }
+            $portText = Read-Host ('Port (Enter for ' + $securePort + ')')
+            $port = $securePort
             if ($portText -and -not [int]::TryParse($portText, [ref]$port)) { continue }
-            if (Test-KysServer $address $port) {
-                $server = @{address=$address; port=$port; name=$address; manual=$true}
+            if (Test-KysServer $address $port $scheme) {
+                $server = @{address=$address; port=$port; name=$address; manual=$true; scheme=$scheme}
             } else { Write-Host 'Cannot reach a compatible KYS Finance server at that address.' }
             continue
         }
@@ -180,7 +191,8 @@ try {
         if ([int]::TryParse($choice, [ref]$index) -and $index -ge 1 -and $index -le $servers.Count) { $server = $servers[$index - 1] }
     }
     Save-KysServer $server
-    Start-Process ("http://{0}:{1}/" -f $server.address, $server.port)
+    $scheme = if ($server.scheme -eq "https") { "https" } else { "http" }
+    Start-Process ("{0}://{1}:{2}/" -f $scheme, $server.address, $server.port)
 } catch {
     Write-Host "Could not open KYS Finance: $($_.Exception.Message)"
     [void](Read-Host 'Press Enter to close')

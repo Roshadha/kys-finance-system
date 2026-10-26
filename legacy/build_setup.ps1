@@ -8,7 +8,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Server build failed.' }
 $server = Join-Path $root 'release\company-win7\KYS Finance Server'
 Copy-Item -LiteralPath (Join-Path $root 'build-package\uninstaller-output\KYS Finance Uninstall.exe') -Destination $server -Force
 foreach ($name in @('kys-finance-pl.ico','kys-finance-pl.png')) { Copy-Item -LiteralPath (Join-Path $root ('assets\' + $name)) -Destination $server -Force }
-$unsafe = Get-ChildItem -LiteralPath $server -Recurse -Force | Where-Object { $_.Name -match '\.db($|-)|^\.secret_key$|^backup-target\.txt$|^setup-complete\.txt$|^company-installation\.txt$' -or ($_.PSIsContainer -and $_.Name -in @('data','backups','restore-recovery')) }
+$unsafe = Get-ChildItem -LiteralPath $server -Recurse -Force | Where-Object { $_.Name -match '\.db($|-)|^\.secret_key$|^backup-target\.txt$|^backup-(settings|status)\.json$|^server-tls\.json$|\.(pem|key)$|^setup-complete\.txt$|^company-installation\.txt$' -or ($_.PSIsContainer -and $_.Name -in @('data','backups','restore-recovery')) }
 if ($unsafe) { throw 'Runtime data in package. Refusing to build installer.' }
 $payload = Join-Path $root 'build-package\server-payload.zip'
 Add-Type -AssemblyName System.IO.Compression.FileSystem

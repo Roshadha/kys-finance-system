@@ -17,7 +17,24 @@ def connect_readonly(path):
 
 
 def migrate_staged_backup(staged, current):
-    """Only upgrade the known pre-user-delete schema, never the source backup."""
+    """Upgrade recognized schemas in a disposable staged copy only."""
+    with closing(connect_readonly(staged)) as source:
+        if source.execute('PRAGMA user_version').fetchone()[0] > 1:
+            raise ValueError('This backup was made by a newer server. Update the server before restoring it.')
+        columns = {r[1]: r[2].upper() for r in source.execute('PRAGMA table_info(category)')}
+        legacy_ids = columns.get('id', '').startswith('INT') and 'code' in columns
+    if legacy_ids:
+        from sqlalchemy import create_engine, MetaData
+        from schema_migrations import migrate_legacy_ids
+        current_engine = create_engine('sqlite:///' + Path(current).resolve().as_posix())
+        staged_engine = create_engine('sqlite:///' + Path(staged).resolve().as_posix())
+        try:
+            metadata = MetaData()
+            metadata.reflect(bind=current_engine, only=['group', 'category', 'transaction', 'audit_log'])
+            migrate_legacy_ids(staged_engine, Path(staged).parent / 'migration-backups', metadata.tables, [])
+        finally:
+            current_engine.dispose()
+            staged_engine.dispose()
     with closing(connect_readonly(staged)) as source, closing(connect_readonly(current)) as target:
         if source.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise ValueError('Backup integrity check failed.')
@@ -39,11 +56,16 @@ def migrate_staged_backup(staged, current):
         with closing(sqlite3.connect(str(staged))) as connection:
             with connection:
                 connection.execute('ALTER TABLE user ADD COLUMN deleted BOOLEAN NOT NULL DEFAULT 0')
-    return inspect_backup(staged, current)
+    result = inspect_backup(staged, current)
+    with closing(sqlite3.connect(str(staged))) as connection:
+        connection.execute('PRAGMA user_version=1')
+    return result
 
 
 def inspect_backup(path, current):
     with closing(connect_readonly(path)) as source, closing(connect_readonly(current)) as target:
+        if source.execute('PRAGMA user_version').fetchone()[0] > 1:
+            raise ValueError('This backup requires a newer server version.')
         if source.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise ValueError('This backup is damaged. Choose another backup.')
         if source.execute('PRAGMA foreign_key_check').fetchone():
