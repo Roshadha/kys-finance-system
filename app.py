@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import os
 import secrets
 import shutil
@@ -1136,6 +1137,7 @@ def register_routes(app):
     @app.route("/transactions/new", methods=["GET", "POST"])
     @login_required
     def transaction_new():
+        duplicate_warning = None
         requested_kind = request.args.get("kind", request.form.get("kind", "income"))
         if requested_kind not in {"income", "expense"}:
             requested_kind = "income"
@@ -1151,7 +1153,7 @@ def register_routes(app):
                 if len(submission) != 32 or any(c not in '0123456789abcdef' for c in submission):
                     abort(400, 'Refresh the entry form before saving.')
                 payload = {key: request.form.getlist(key) for key in sorted(request.form)
-                           if key not in {'csrf_token', 'submission_token'}}
+                           if key not in {'csrf_token', 'submission_token', 'duplicate_confirmation'}}
                 payload['requested_kind'] = requested_kind
                 digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
                 saved = AuditLog.query.filter_by(action='entry_submission', entity_type='submission',
@@ -1185,6 +1187,19 @@ def register_routes(app):
                     raise ValueError("Grand total must be greater than zero.")
                 reference = request.form.get("reference", "").strip()
                 counterparty = request.form.get("counterparty", "").strip()
+                month_start = cash_date.replace(day=1)
+                month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+                existing = live_transactions().filter(
+                    Transaction.category_id == category.id,
+                    Transaction.cash_date >= month_start, Transaction.cash_date < month_end
+                ).order_by(Transaction.id).all()
+                if existing:
+                    message = json.dumps([current_user().id, submission, digest, [row.id for row in existing]])
+                    confirmation = hmac.new(str(app.secret_key).encode(), message.encode(), hashlib.sha256).hexdigest()
+                    if not hmac.compare_digest(request.form.get('duplicate_confirmation', ''), confirmation):
+                        duplicate_warning = {'name': category.name, 'month': month_start.strftime('%B %Y'),
+                                             'count': len(existing), 'confirmation': confirmation}
+                        raise ValueError('This particular already has entries in the selected month.')
                 item = Transaction(
                     cash_date=cash_date, category_id=category.id,
                     reference=reference, counterparty=counterparty,
@@ -1202,12 +1217,14 @@ def register_routes(app):
                 return redirect(url_for("transaction_new", kind=requested_kind))
             except (ValueError, TypeError) as exc:
                 db.session.rollback()
-                flash(str(exc), "error")
+                if not duplicate_warning:
+                    flash(str(exc), "error")
         subtotal_only_groups = {name for kind, name in SUBTOTAL_ONLY_GROUPS if kind == requested_kind}
         subtotal_only_groups.update(c.group_name for c in categories if c.service_line or c.name in {'SSCL', 'VAT'})
         if requested_kind == 'expense':
             subtotal_only_groups.update(c.group_name for c in categories)
         return render_template("transaction_form.html", kind=requested_kind, categories=categories,
+                               duplicate_warning=duplicate_warning,
                                submission_token=request.form.get('submission_token') or secrets.token_hex(16),
                                subtotal_only_groups=subtotal_only_groups)
 

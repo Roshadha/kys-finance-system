@@ -1,4 +1,6 @@
-# KYS Finance 2.0.0 — 26 October 2026
+# KYS Finance 2.0.1 — 26 October 2026
+
+- Saving another entry for the same particular and month now opens a confirmation dialog. Cancel preserves the form; confirming saves the additional entry. Deleted entries are excluded. Confirmation is checked on the server and bound to the submitted values.
 
 - Entry forms carry a persistent submission token. Retrying the same save returns the original result; reusing a token for changed data is rejected. Old forms must be refreshed once after updating.
 - Automatic codes exclude the reserved legacy range (900000 and above). Custom chart accounts are kept by default. Legacy retirement is an explicit preview option; posted unmatched accounts and unresolved code conflicts stop that action.

@@ -17,4 +17,21 @@
   </div></div></section>
   <aside class="card amount-card"><span class="eyebrow">Amount breakdown</span><h2>Cash value</h2><label>Sub total (Rs.)<input class="money-input" type="text" inputmode="decimal" name="subtotal" id="subtotal" required value="{{ request.form.get('subtotal','') }}" placeholder="0.00" autocomplete="off"></label><div class="grand-total"><span>Grand total</span><strong>Rs. <output id="grandTotal">0.00</output></strong></div><div class="locked-note">⌾ Saved entries are locked. Administrators can adjust or delete incorrect entries with an audit record.</div><button class="btn primary wide" type="submit">Save &amp; lock entry</button><a class="btn ghost wide" href="{{ url_for('transactions') }}">Cancel</a></aside>
 </form>
+{% if duplicate_warning %}
+<div class="confirm-overlay" id="duplicateEntryModal">
+  <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="duplicateEntryTitle" aria-describedby="duplicateEntryHelp">
+    <h2 id="duplicateEntryTitle">Add another entry?</h2>
+    <p class="confirm-summary">{{ duplicate_warning.name }} · {{ duplicate_warning.month }}</p>
+    <p id="duplicateEntryHelp">This particular already has {{ duplicate_warning.count }} saved {{ 'entry' if duplicate_warning.count == 1 else 'entries' }} in this month. Do you want to add this entry as well?</p>
+    <form method="post" id="duplicateEntryConfirmForm">
+      {% for name in request.form %}{% if name != 'duplicate_confirmation' %}{% for value in request.form.getlist(name) %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}{% endif %}{% endfor %}
+      <input type="hidden" name="duplicate_confirmation" value="{{ duplicate_warning.confirmation }}">
+      <div class="confirm-actions">
+        <button class="btn secondary" type="button" id="duplicateEntryCancel">Cancel</button>
+        <button class="btn primary" type="submit">Yes, add entry</button>
+      </div>
+    </form>
+  </section>
+</div>
+{% endif %}
 {% endblock %}

@@ -1,4 +1,30 @@
 document.addEventListener('DOMContentLoaded', () => {
+  const duplicateModal = document.getElementById('duplicateEntryModal');
+  if (duplicateModal) {
+    const cancel = document.getElementById('duplicateEntryCancel');
+    const confirmForm = document.getElementById('duplicateEntryConfirmForm');
+    document.body.classList.add('confirmation-open');
+    cancel.focus();
+    const close = () => {
+      duplicateModal.hidden = true;
+      document.body.classList.remove('confirmation-open');
+      document.querySelector('#transactionForm button[type="submit"]').focus();
+    };
+    cancel.addEventListener('click', close);
+    duplicateModal.addEventListener('click', event => { if (event.target === duplicateModal) close(); });
+    document.addEventListener('keydown', event => {
+      if (duplicateModal.hidden) return;
+      if (event.key === 'Escape') { event.preventDefault(); close(); }
+      if (event.key === 'Tab') {
+        const buttons = duplicateModal.querySelectorAll('button');
+        if (event.shiftKey && document.activeElement === buttons[0]) { event.preventDefault(); buttons[1].focus(); }
+        else if (!event.shiftKey && document.activeElement === buttons[1]) { event.preventDefault(); buttons[0].focus(); }
+      }
+    });
+    confirmForm.addEventListener('submit', () => {
+      confirmForm.querySelector('button[type="submit"]').disabled = true;
+    });
+  }
   const entryForm = document.getElementById('transactionForm');
   if (entryForm && entryForm.dataset.periodUrl) {
     const month = entryForm.elements.month_number;

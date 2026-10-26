@@ -1,4 +1,5 @@
 import secrets
+import re
 import tempfile
 from pathlib import Path
 from unittest import TestCase
@@ -11,6 +12,38 @@ class ReviewFixTests(TestCase):
     setUp = test_support.FinanceAppTests.setUp
     login = test_support.FinanceAppTests.login
     csrf = test_support.FinanceAppTests.csrf
+
+    def test_monthly_duplicate_requires_confirmation_and_preserves_retry_safety(self):
+        self.login()
+        with self.app.app_context():
+            cid = Category.query.filter_by(name='Security Service Income').one().id
+        data = {'csrf_token': self.csrf(), 'submission_token': secrets.token_hex(16),
+                'category_id': cid, 'group_name': 'Trade Income', 'year': '2026',
+                'month_number': '4', 'subtotal': '100'}
+        url = '/transactions/new?kind=income'
+        self.assertEqual(self.client.post(url, data=data).status_code, 302)
+        data['submission_token'] = secrets.token_hex(16)
+        response = self.client.post(url, data=data)
+        self.assertIn(b'Add another entry?', response.data)
+        with self.app.app_context():
+            self.assertEqual(Transaction.query.count(), 1)
+        token = re.search(rb'name="duplicate_confirmation" value="([a-f0-9]+)"', response.data).group(1).decode()
+        changed = dict(data, subtotal='200', duplicate_confirmation=token)
+        self.assertIn(b'Add another entry?', self.client.post(url, data=changed).data)
+        data['duplicate_confirmation'] = token
+        self.assertEqual(self.client.post(url, data=data).status_code, 302)
+        self.assertEqual(self.client.post(url, data=data).status_code, 302)
+        with self.app.app_context():
+            self.assertEqual(Transaction.query.count(), 2)
+        data.update(month_number='5', submission_token=secrets.token_hex(16))
+        self.assertEqual(self.client.post(url, data=data).status_code, 302)
+        with self.app.app_context():
+            may_entry = Transaction.query.filter(Transaction.cash_date >= __import__('datetime').date(2026, 5, 1)).one()
+            db.session.add(AuditLog(action='delete', entity_type='transaction', entity_id=str(may_entry.id)))
+            db.session.commit()
+        data.update(submission_token=secrets.token_hex(16))
+        data.pop('duplicate_confirmation')
+        self.assertEqual(self.client.post(url, data=data).status_code, 302)
 
     def test_retry_and_changed_retry_cannot_create_second_entry(self):
         self.login()

@@ -50,9 +50,17 @@ class HandoverTests(unittest.TestCase):
                     token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
                     barrier.wait(timeout=30)
                     for number in range(3):
-                        request('/transactions/new?kind=income', {'submission_token': secrets.token_hex(16), 'csrf_token': token, 'kind': 'income',
+                        fields = {'submission_token': secrets.token_hex(16), 'csrf_token': token, 'kind': 'income',
                             'group_name': 'Trade Income', 'category_id': category, 'cash_date': '2026-10-10',
-                            'reference': 'CONCURRENT-{}-{}'.format(index, number), 'subtotal': '100'})
+                            'reference': 'CONCURRENT-{}-{}'.format(index, number), 'subtotal': '100'}
+                        for confirmation_attempt in range(20):
+                            result = request('/transactions/new?kind=income', fields).decode()
+                            confirmation = re.search(r'name="duplicate_confirmation" value="([^"]+)"', result)
+                            if not confirmation:
+                                break
+                            fields['duplicate_confirmation'] = confirmation.group(1)
+                        else:
+                            raise AssertionError('Monthly confirmation did not complete')
                     return request('/reports?type=monthly&start=2026-10-10&end=2026-10-10')
                 try:
                     with ThreadPoolExecutor(max_workers=4) as pool:
